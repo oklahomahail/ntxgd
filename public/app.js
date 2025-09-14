@@ -1,4 +1,4 @@
-/* Enhanced NTXGD front-end with performance optimizations */
+/* Enhanced NTXGD front-end with high-impact improvements */
 (() => {
   const els = {
     totalRaised: document.getElementById('totalRaised'),
@@ -18,6 +18,7 @@
   };
 
   let orgs = {};
+  let previousOrgs = {}; // Track previous values for change detection
   let isMonitoring = false;
   let timer = null;
   let isRefreshing = false;
@@ -59,7 +60,7 @@
   // Enhanced API function with timeout and better error handling
   async function api(path, opts = {}) {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s timeout
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
     
     try {
       const res = await fetch(path, { 
@@ -85,6 +86,30 @@
     }
   }
 
+  // Get freshness status for an organization
+  function getFreshnessStatus(org) {
+    if (!org.lastUpdated) return 'never';
+    
+    const timeSinceUpdate = (Date.now() - new Date(org.lastUpdated).getTime()) / 1000;
+    
+    if (timeSinceUpdate < 300) return 'fresh';        // < 5 minutes
+    if (timeSinceUpdate < 900) return 'stale';        // < 15 minutes  
+    return 'very-stale';                              // > 15 minutes
+  }
+
+  // Check if organization was recently updated (for highlighting)
+  function wasRecentlyUpdated(orgId) {
+    const current = orgs[orgId];
+    const previous = previousOrgs[orgId];
+    
+    if (!current || !previous) return false;
+    
+    // Check if total or donors changed
+    return (current.total !== previous.total || 
+            current.donors !== previous.donors ||
+            current.goal !== previous.goal);
+  }
+
   // Optimized summary update with change detection
   let lastSummary = {};
   function updateSummary() {
@@ -106,14 +131,32 @@
     }
   }
 
-  // Use DocumentFragment for better performance on large updates
+  // Show gentle start prompt
+  function showGentleStart() {
+    els.orgsContainer.innerHTML = `
+      <div class="gentle-start">
+        <h3>Ready to track your organizations</h3>
+        <p>Click "Start Auto-Refresh" to begin monitoring donation progress in real-time, or "Refresh Now" for a one-time update.</p>
+        <div style="display: flex; gap: 12px; justify-content: center;">
+          <button class="btn btn-success" onclick="document.getElementById('startBtn').click()">
+            Start Auto-Refresh
+          </button>
+          <button class="btn btn-primary" onclick="document.getElementById('refreshNowBtn').click()">
+            Refresh Now
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  // Enhanced render function with all improvements
   function render() {
     const arr = Object.values(orgs).sort((a, b) => (b.total || 0) - (a.total || 0));
     
     if (!arr.length) {
-      els.orgsContainer.innerHTML = '<div class="loading"><div class="spinner"></div><p>Loading your organizations…</p></div>';
+      showGentleStart();
       if (els.headerDescription) {
-        els.headerDescription.textContent = 'Loading your organizations…';
+        els.headerDescription.textContent = 'Ready to track your organizations';
       }
       return;
     }
@@ -129,14 +172,31 @@
 
     arr.forEach(org => {
       const card = document.createElement('div');
-      card.className = 'org-card';
+      const freshness = getFreshnessStatus(org);
+      const recentlyUpdated = wasRecentlyUpdated(org.id);
+      
+      // Build CSS classes
+      let cardClasses = 'org-card';
+      if (org.error) cardClasses += ' has-error';
+      if (recentlyUpdated) cardClasses += ' recently-updated';
+      
+      card.className = cardClasses;
       card.setAttribute('data-org-id', org.id);
       
       const avgGift = org.donors ? (org.total / org.donors) : 0;
       const goalProgress = org.goal ? Math.round((org.total / org.goal) * 100) : 0;
+      const goalProgressCapped = Math.min(goalProgress, 100); // Cap at 100% for visual
+      
+      // Freshness indicator
+      let freshnessClass = freshness === 'never' ? '' : freshness;
+      const freshnessIndicator = freshness === 'never' ? '' : 
+        `<span class="freshness-indicator ${freshnessClass}" title="Last updated ${freshness === 'fresh' ? 'recently' : freshness === 'stale' ? '5-15 min ago' : 'over 15 min ago'}"></span>`;
       
       card.innerHTML = `
-        <div class="org-name">${org.name}</div>
+        <div class="org-name">
+          ${org.name}
+          ${freshnessIndicator}
+        </div>
         ${org.error ? `<div class="error">${org.error}<button class="btn btn-small" data-retry="${org.id}">Retry</button></div>` : ''}
         <div class="org-total">${fmt$(org.total)}</div>
         <div class="org-stats">
@@ -148,9 +208,12 @@
             <div class="stat-value">${fmt$(avgGift)}</div>
             <div class="stat-label">Avg Gift</div>
           </div>
-          <div class="stat-item">
-            <div class="stat-value">${goalProgress}%</div>
+          <div class="stat-item goal-progress">
             <div class="stat-label">Goal Progress</div>
+            <div class="progress-container">
+              <div class="progress-bar" style="width: ${goalProgressCapped}%"></div>
+              <div class="progress-text">${goalProgress}%</div>
+            </div>
           </div>
         </div>
         <div class="org-actions">
@@ -192,6 +255,12 @@
       button.textContent = 'Refreshing…';
       
       const data = await api(`/api/organizations/${id}/refresh`, { method: 'PUT' });
+      
+      // Store previous state before updating
+      if (orgs[id]) {
+        previousOrgs[id] = { ...orgs[id] };
+      }
+      
       orgs[id] = data;
       updateSummary();
       render();
@@ -212,6 +281,7 @@
       render();
     } catch (e) {
       toast(`Failed to load organizations: ${e.message}`, false);
+      showGentleStart(); // Show gentle start even on load failure
     }
   }
 
@@ -224,6 +294,9 @@
         els.refreshNowBtn.disabled = true;
         els.refreshNowBtn.textContent = 'Refreshing…';
       }
+      
+      // Store previous state
+      previousOrgs = JSON.parse(JSON.stringify(orgs));
       
       const res = await api('/api/organizations/refresh', { method: 'PUT' });
       orgs = res.data || orgs;
@@ -262,10 +335,9 @@
     timer = setInterval(async () => {
       try {
         await refreshAll();
-        failedAttempts = 0; // Reset on success
+        failedAttempts = 0;
       } catch (e) {
         failedAttempts++;
-        // Exponential backoff: 90s, 180s, 360s, max 600s
         const delay = Math.min(secs * Math.pow(2, failedAttempts), 600);
         clearInterval(timer);
         timer = setTimeout(() => start(), delay * 1000);
@@ -347,16 +419,15 @@
     }
   }
 
-  // Check for server health on startup
-  async function checkServerHealth() {
-    try {
-      const health = await api('/api/health');
-      if (health.status === 'ok') {
-        console.log('Server health check passed:', health);
+  // Keyboard shortcut handler
+  function handleKeyboardShortcuts(e) {
+    // Ctrl/Cmd + R for refresh
+    if ((e.ctrlKey || e.metaKey) && e.key === 'r') {
+      e.preventDefault();
+      if (!isRefreshing) {
+        refreshAll();
+        toast('Refreshed via keyboard shortcut');
       }
-    } catch (e) {
-      console.warn('Server health check failed:', e.message);
-      toast('Server may be experiencing issues', false);
     }
   }
 
@@ -370,8 +441,15 @@
     els.refreshNowBtn?.addEventListener('click', refreshAll);
     els.exportBtn?.addEventListener('click', exportData);
     
-    // Check server health and load initial data
-    checkServerHealth();
+    // Add keyboard shortcut
+    document.addEventListener('keydown', handleKeyboardShortcuts);
+    
+    // Add keyboard shortcut hint to refresh button
+    if (els.refreshNowBtn) {
+      els.refreshNowBtn.innerHTML += '<span class="shortcut-hint">(Ctrl+R)</span>';
+    }
+    
+    // Load initial data
     load();
     
     // Fallback refresh every 10 minutes when not monitoring
@@ -382,13 +460,12 @@
     }, 600000);
   });
 
-  // Handle visibility change to optimize when tab is hidden
+  // Handle visibility change
   document.addEventListener('visibilitychange', () => {
     if (document.hidden && isMonitoring) {
       console.log('Tab hidden, continuing background refresh');
     } else if (!document.hidden && isMonitoring) {
       console.log('Tab visible, refresh active');
-      // Optionally trigger immediate refresh when tab becomes visible
     }
   });
 
@@ -399,11 +476,5 @@
     }
   });
 
-  // Global error handler for unhandled promise rejections
-  window.addEventListener('unhandledrejection', (event) => {
-    console.error('Unhandled promise rejection:', event.reason);
-    toast('An unexpected error occurred', false);
-  });
-
 })();
-// Enhanced version - integrated improvements
+// Enhanced version with high-impact UI improvements

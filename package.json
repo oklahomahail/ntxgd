@@ -1,15 +1,16 @@
 {
   "name": "ntgd-monitor",
-  "version": "1.0.0",
-  "description": "North Texas Giving Day real-time fundraising monitor",
+  "version": "2.0.0",
+  "description": "North Texas Giving Day real-time fundraising monitor with enhanced features",
   "scripts": {
-    "dev": "node server/local.js",
-    "start": "node server/local.js",
-    "build": "echo 'No build step required'",
+    "dev": "NODE_ENV=development node server/local.js",
+    "start": "NODE_ENV=production node server/local.js",
+    "build": "echo 'No build step required for this static application'",
     "test": "jest --passWithNoTests",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
-    "lint": "echo 'Add ESLint configuration if needed'"
+    "lint": "echo 'Add ESLint configuration if needed'",
+    "health": "curl -f http://localhost:3001/api/health || exit 1"
   },
   "keywords": [
     "fundraising",
@@ -18,9 +19,11 @@
     "giving-day",
     "monitoring",
     "web-scraping",
-    "express"
+    "express",
+    "real-time",
+    "dashboard"
   ],
-  "author": "Your Name",
+  "author": "Dave Hail",
   "license": "MIT",
   "dependencies": {
     "axios": "^1.7.2",
@@ -37,7 +40,7 @@
     "supertest": "^6.3.3"
   },
   "engines": {
-    "node": "22.x"
+    "node": "18.x || 20.x || 22.x"
   },
   "repository": {
     "type": "git",
@@ -46,5 +49,9 @@
   "bugs": {
     "url": "https://github.com/oklahomahail/ntxgd/issues"
   },
-  "homepage": "https://github.com/oklahomahail/ntxgd#readme"
+  "homepage": "https://github.com/oklahomahail/ntxgd#readme",
+  "config": {
+    "port": 3001,
+    "host": "0.0.0.0"
+  }
 }

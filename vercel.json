@@ -3,8 +3,7 @@
   "functions": {
     "api/index.js": {
       "maxDuration": 30,
-      "memory": 512,
-      "includeFiles": "config/**"
+      "memory": 512
     }
   },
   "routes": [

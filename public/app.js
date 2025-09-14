@@ -16,11 +16,14 @@
     refreshInterval: document.getElementById('refreshInterval'),
     headerDescription: document.getElementById('headerDescription')
   };
+
   let orgs = {};
   let isMonitoring = false;
   let timer = null;
+
   const fmt$ = n => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits:0, maximumFractionDigits:0 }).format(n||0);
   const fmtN = n => new Intl.NumberFormat('en-US').format(n||0);
+
   const toast = (msg, ok=true) => {
     const t = document.createElement('div');
     t.className = 'toast ' + (ok ? 'success':'error');
@@ -29,21 +32,25 @@
     requestAnimationFrame(()=>t.classList.add('show'));
     setTimeout(()=>{ t.classList.remove('show'); setTimeout(()=>t.remove(),300); }, 2500);
   };
+
   async function api(path, opts) {
     const res = await fetch(path, { headers: { 'Content-Type':'application/json' }, ...opts });
     if (!res.ok) throw new Error(await res.text().catch(()=>res.statusText));
     return res.json();
   }
+
   function updateSummary() {
     const arr = Object.values(orgs);
     const totalRaised = arr.reduce((s,o)=>s+(o.total||0), 0);
     const totalDonors = arr.reduce((s,o)=>s+(o.donors||0), 0);
     const avgGift = totalDonors>0 ? totalRaised/totalDonors : 0;
+
     els.totalRaised.textContent = fmt$(totalRaised);
     els.totalDonors.textContent = fmtN(totalDonors);
     els.avgGift.textContent = fmt$(avgGift);
     els.orgCount.textContent = fmtN(arr.length);
   }
+
   function render() {
     const arr = Object.values(orgs).sort((a,b)=>(b.total||0)-(a.total||0));
     if (!arr.length) {
@@ -95,6 +102,7 @@
       r && r.click();
     }));
   }
+
   async function load() {
     try {
       const data = await api('/api/organizations');
@@ -104,6 +112,7 @@
       toast(`Failed to load organizations: ${e.message}`, false);
     }
   }
+
   async function refreshAll() {
     try {
       if (els.refreshNowBtn) { els.refreshNowBtn.disabled = true; els.refreshNowBtn.textContent = 'Refreshing…'; }
@@ -117,6 +126,7 @@
       if (els.refreshNowBtn) { els.refreshNowBtn.disabled = false; els.refreshNowBtn.textContent = 'Refresh Now'; }
     }
   }
+
   function start() {
     const secs = Math.max(30, parseInt(els.refreshInterval.value)||90);
     els.refreshInterval.value = secs;
@@ -130,6 +140,7 @@
     refreshAll();
     toast(`Auto-refresh started (${secs}s)`);
   }
+
   function stop() {
     isMonitoring = false;
     if (timer) clearInterval(timer), (timer = null);
@@ -139,6 +150,7 @@
     els.statusText.textContent = 'Auto-refresh stopped';
     toast('Auto-refresh stopped');
   }
+
   function exportData() {
     const rows = [['Organization','Total Raised','Donors','Avg Gift','Goal %','Last Updated','Status']];
     const arr = Object.values(orgs);
@@ -153,6 +165,7 @@
     a.download = `ntgd-${new Date().toISOString().replace(/[:T]/g,'-').slice(0,16)}.csv`;
     document.body.appendChild(a); a.click(); a.remove();
   }
+
   document.addEventListener('DOMContentLoaded', () => {
     els.startBtn && els.startBtn.addEventListener('click', start);
     els.stopBtn && els.stopBtn.addEventListener('click', stop);

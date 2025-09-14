@@ -5,7 +5,7 @@
       "runtime": "nodejs22.x",
       "maxDuration": 30,
       "memory": 512,
-      "includeFiles": ["config/organizations.json", "public/**"]
+      "includeFiles": "config/**"
     }
   },
   "routes": [

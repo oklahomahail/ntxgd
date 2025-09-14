@@ -1,9 +1,17 @@
 {
   "version": 2,
-  "functions": { "api/index.js": { "maxDuration": 30 } },
+  "functions": { 
+    "api/index.js": { "maxDuration": 30 } 
+  },
   "routes": [
     { "src": "^/api/(.*)$", "dest": "/api/index.js" },
     { "handle": "filesystem" },
     { "src": "/(.*)", "dest": "/public/index.html" }
+  ],
+  "crons": [
+    {
+      "path": "/api/organizations/refresh",
+      "schedule": "*/15 8-20 * * *"
+    }
   ]
 }

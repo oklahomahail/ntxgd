@@ -1,4 +1,4 @@
-// server/app.js - Enhanced NTXGD Monitor with all improvements
+// server/app.js - Enhanced NTXGD Monitor with all improvements + data sanity protection
 'use strict';
 
 const express = require('express');
@@ -12,9 +12,6 @@ let axios;     try { axios = require('axios'); } catch { axios = null; }
 let cheerio;   try { cheerio = require('cheerio'); } catch { cheerio = null; }
 
 // --------------------------- Configuration ---------------------------
-const MAX_RETRIES = Number(process.env.MAX_RETRIES || 2);
-const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 12000);
-const BATCH_DELAY_MS = Number(process.env.BATCH_DELAY_MS || 600);
 const config = {
   // Server
   port: parseInt(process.env.PORT) || 3001,
@@ -25,10 +22,10 @@ const config = {
   allowedOrigins: (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean),
   
   // Scraping
-  batchDelayMs: parseInt(process.env.BATCH_DELAY_MS) || 500,
-  requestTimeoutMs: parseInt(process.env.REQUEST_TIMEOUT_MS) || 15000,
-  maxRetries: parseInt(process.env.MAX_RETRIES) || 3,
-  userAgent: process.env.USER_AGENT || 'NTXGD-Monitor/1.0 (+vercel)',
+  batchDelayMs: parseInt(process.env.BATCH_DELAY_MS) || 600,
+  requestTimeoutMs: parseInt(process.env.REQUEST_TIMEOUT_MS) || 12000,
+  maxRetries: parseInt(process.env.MAX_RETRIES) || 2,
+  userAgent: process.env.USER_AGENT || 'NTXGD-Monitor/2.0 (+vercel)',
   
   // Rate limiting
   rateLimitWindowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 60000,
@@ -104,7 +101,7 @@ async function getWithRetry(url, tries = 3) {
       if (i < tries - 1) {
         const delay = Math.min(1000 * Math.pow(2, i), 5000);
         logger.debug(`Retry attempt ${i + 1} failed for ${url}, retrying in ${delay}ms`);
-        await sleep(BATCH_DELAY_MS);
+        await sleep(delay);
       }
     }
   }
@@ -254,6 +251,29 @@ function extractFundraisingData(html) {
     goal: goal || 0, 
     lastUpdated: new Date().toISOString(), 
     error: null 
+  };
+}
+
+// Data sanity protection function
+function saneMerge(prev, next, orgName = 'Unknown') {
+  const safeTotal = 
+    (next.total <= 0 || !Number.isFinite(next.total)) ? prev.total :
+    (prev.total > 0 && next.total > prev.total * 5) ? 
+      (logger.warn(`Rejecting suspicious total jump: $${prev.total} -> $${next.total} for ${orgName}`), prev.total) : 
+      next.total;
+
+  const safeDonors = 
+    (next.donors < 0 || !Number.isFinite(next.donors)) ? prev.donors : next.donors;
+
+  const safeGoal = 
+    (next.goal < 0 || !Number.isFinite(next.goal)) ? prev.goal : next.goal;
+
+  return { 
+    total: safeTotal, 
+    donors: safeDonors, 
+    goal: safeGoal,
+    lastUpdated: next.lastUpdated,
+    error: next.error
   };
 }
 
@@ -420,7 +440,7 @@ app.get('/api/metrics', (req, res) => {
 // Read all organizations
 app.get('/api/organizations', (req, res) => res.json(organizationsData));
 
-// Refresh single organization
+// Refresh single organization with sanity protection
 app.put('/api/organizations/:id/refresh', async (req, res) => {
   const id = String(req.params.id || '').toLowerCase();
   const org = organizationsData[id];
@@ -450,13 +470,11 @@ app.put('/api/organizations/:id/refresh', async (req, res) => {
     const duration = Date.now() - startTime;
     logger.info(`Completed ${org.name} in ${duration}ms - Total: $${data.total}, Donors: ${data.donors}`);
     
+    // Apply sanity checking to prevent bad data
+    const saneData = saneMerge(org, data, org.name);
     const updatedOrg = {
       ...org,
-      total: (data.total || 0) > 0 ? data.total : org.total,
-      donors: (data.donors || 0) > 0 ? data.donors : org.donors,
-      goal: data.goal || org.goal,
-      lastUpdated: new Date().toISOString(),
-      error: null,
+      ...saneData,
       lastRefreshDuration: duration
     };
     
@@ -499,7 +517,7 @@ app.put('/api/organizations/:id/refresh', async (req, res) => {
   }
 });
 
-// Bulk refresh
+// Bulk refresh with sanity protection
 app.put('/api/organizations/refresh', async (req, res) => {
   const startTime = Date.now();
   const results = {};
@@ -525,13 +543,11 @@ app.put('/api/organizations/refresh', async (req, res) => {
       const resp = await getWithRetry(org.url, config.maxRetries);
       const data = extractFundraisingData(resp.data);
       
+      // Apply sanity checking to prevent bad data
+      const saneData = saneMerge(org, data, org.name);
       organizationsData[id] = {
         ...org,
-        total: (data.total || 0) > 0 ? data.total : org.total,
-        donors: (data.donors || 0) > 0 ? data.donors : org.donors,
-        goal: data.goal || org.goal,
-        lastUpdated: new Date().toISOString(),
-        error: null
+        ...saneData
       };
       
       results[id] = 'success';

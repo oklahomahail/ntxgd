@@ -2,18 +2,24 @@
   "name": "ntgd-monitor",
   "version": "1.0.0",
   "description": "North Texas Giving Day real-time fundraising monitor",
-  "main": "erver/app.js",
-   "scripts": {
-    "dev": "node server/local.js",
+  "main": "server/app.js",
+  "scripts": {
+    "dev": "nodemon server/local.js",
     "start": "node server/local.js",
-    "test": "jest --passWithNoTests"
+    "build": "echo 'No build step required'",
+    "test": "jest --passWithNoTests",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "lint": "echo 'Add ESLint configuration if needed'"
   },
   "keywords": [
     "fundraising",
     "nonprofit",
     "north-texas",
     "giving-day",
-    "monitoring"
+    "monitoring",
+    "web-scraping",
+    "express"
   ],
   "author": "Your Name",
   "license": "MIT",
@@ -21,6 +27,7 @@
     "axios": "^1.12.1",
     "cheerio": "^1.1.2",
     "cors": "^2.8.5",
+    "dotenv": "^17.2.2",
     "express": "^4.21.2",
     "express-rate-limit": "^7.5.1",
     "helmet": "^7.2.0"
@@ -32,6 +39,13 @@
   },
   "engines": {
     "node": ">=18.0.0"
-  }
-  
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/oklahomahail/ntxgd.git"
+  },
+  "bugs": {
+    "url": "https://github.com/oklahomahail/ntxgd/issues"
+  },
+  "homepage": "https://github.com/oklahomahail/ntxgd#readme"
 }

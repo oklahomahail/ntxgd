@@ -2,7 +2,7 @@
   "name": "ntgd-monitor",
   "version": "1.0.0",
   "description": "North Texas Giving Day real-time fundraising monitor",
-  "main": "server.js",
+  "main": "erver/app.js",
    "scripts": {
     "dev": "node server/local.js",
     "start": "node server/local.js",

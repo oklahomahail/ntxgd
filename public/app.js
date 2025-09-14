@@ -1,331 +1,341 @@
-// server/app.js
-// Express app (no app.listen here). Used by Vercel (serverless) and by local runner.
+// public/app.js
+(() => {
+  'use strict';
 
-const express = require('express');
-const cors = require('cors');
-const helmet = require('helmet');
-let rateLimit;
-try { rateLimit = require('express-rate-limit'); } catch (_) { /* optional */ }
-const axios = require('axios');
-const cheerio = require('cheerio');
-const path = require('path');
-const fs = require('fs');
-const { URL } = require('url');
+  // ===== Config =====
+  const API_BASE = `${window.location.origin}/api`;
+  const URL_ = window.URL || window.webkitURL; // safe blob URL helper
 
-const app = express();
+  // ===== State =====
+  let organizations = {};           // id -> org
+  let isMonitoring = false;
+  let monitoringInterval = null;
 
-/* ===================== Security & middleware ===================== */
-const ALLOWED = (process.env.ALLOWED_ORIGINS || '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
+  // ===== Utils =====
+  const $ = (sel) => document.querySelector(sel);
 
-// Helmet is safe for serverless too
-app.use(helmet());
+  const formatCurrency = (amount) =>
+    new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: 'USD',
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0
+    }).format(amount || 0);
 
-// In dev you can leave '*' (or set ALLOWED_ORIGINS for stricter CORS)
-app.use(cors({ origin: ALLOWED.length ? ALLOWED : '*' }));
-app.use(express.json());
+  const formatNumber = (num) =>
+    new Intl.NumberFormat('en-US').format(num || 0);
 
-// Local dev can serve /public directly. On Vercel, static is routed via vercel.json.
-app.use(express.static(path.join(__dirname, '..', 'public')));
-
-// Optional: basic rate limiting (if the package is installed)
-if (rateLimit) {
-  app.use(
-    rateLimit({
-      windowMs: 60 * 1000,
-      max: 120,
-      standardHeaders: true,
-      legacyHeaders: false
-    })
-  );
-}
-
-/* ===================== In-memory store ===================== */
-// (Swap for a DB if you need persistence between serverless invocations)
-let organizationsData = {};
-
-/* ===================== Helpers ===================== */
-const UA_HEADERS = { 'User-Agent': 'NTXGD-Monitor/1.0 (+https://example.com)' };
-
-function isValidOrgUrl(raw) {
-  try {
-    const u = new URL(raw);
-    if (u.protocol !== 'https:') return false;
-    if (u.hostname !== 'www.northtexasgivingday.org') return false;
-    const parts = u.pathname.split('/').filter(Boolean);
-    // Expect: /organization/<slug>
-    return parts.length === 2 && parts[0] === 'organization' && parts[1].length > 0;
-  } catch {
-    return false;
+  function showToast(message, type = 'success') {
+    const container = $('#toast-container') || document.body;
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.textContent = message;
+    container.appendChild(toast);
+    // trigger animation
+    requestAnimationFrame(() => toast.classList.add('show'));
+    setTimeout(() => {
+      toast.classList.remove('show');
+      setTimeout(() => toast.remove(), 300);
+    }, 3000);
   }
-}
-function urlToId(raw) {
-  const u = new URL(raw);
-  return u.pathname.split('/').filter(Boolean)[1].toLowerCase();
-}
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-async function getWithRetry(url, tries = 2) {
-  let lastErr;
-  for (let i = 0; i < tries; i++) {
+  async function apiCall(endpoint, options = {}) {
+    const res = await fetch(`${API_BASE}${endpoint}`, {
+      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+      ...options
+    });
+    let data;
     try {
-      return await axios.get(url, { headers: UA_HEADERS, timeout: 12000 });
+      data = await res.json();
+    } catch {
+      data = null;
+    }
+    if (!res.ok) {
+      const msg = (data && (data.error || data.message)) || `HTTP ${res.status}`;
+      throw new Error(msg);
+    }
+    return data;
+  }
+
+  // ===== Rendering =====
+  function renderOrganizations() {
+    const container = $('#organizationsContainer');
+    const orgArray = Object.values(organizations);
+
+    if (orgArray.length === 0) {
+      container.innerHTML = `
+        <div class="loading">
+          <div class="spinner"></div>
+          <p>No organizations configured yet.</p>
+        </div>`;
+      $('#headerDescription') && ($('#headerDescription').textContent = 'No organizations configured yet');
+      $('#orgCount') && ($('#orgCount').textContent = '0');
+      return;
+    }
+
+    // Sort by amount raised desc
+    orgArray.sort((a, b) => (b.total || 0) - (a.total || 0));
+
+    container.innerHTML = `
+      <div class="org-grid">
+        ${orgArray
+          .map((org) => {
+            const avg = org.donors > 0 ? org.total / org.donors : 0;
+            const progress = org.goal > 0 ? Math.round((org.total / org.goal) * 100) : 0;
+            const updated = org.lastUpdated
+              ? new Date(org.lastUpdated).toLocaleTimeString()
+              : 'Not yet updated';
+            return `
+              <div class="org-card" data-org-id="${org.id}">
+                <div class="org-name">${org.name || org.id}</div>
+
+                ${org.error ? `
+                  <div class="error">
+                    ${org.error}
+                    <button class="btn btn-small" data-retry="${org.id}">Retry</button>
+                  </div>` : ''}
+
+                <div class="org-total" aria-label="Total raised: ${formatCurrency(org.total)}">
+                  ${formatCurrency(org.total)}
+                </div>
+
+                <div class="org-stats">
+                  <div class="stat-item">
+                    <div class="stat-value">${formatNumber(org.donors)}</div>
+                    <div class="stat-label">Donors</div>
+                  </div>
+                  <div class="stat-item">
+                    <div class="stat-value">${formatCurrency(avg)}</div>
+                    <div class="stat-label">Avg Gift</div>
+                  </div>
+                  <div class="stat-item">
+                    <div class="stat-value">${progress}%</div>
+                    <div class="stat-label">Goal Progress</div>
+                  </div>
+                </div>
+
+                <div class="org-actions">
+                  <div class="last-updated">Updated: ${updated}</div>
+                  <div style="display:flex; gap:8px;">
+                    <button class="btn btn-primary btn-small" data-refresh="${org.id}">Refresh</button>
+                    <a class="btn btn-primary btn-small" href="${org.url}" target="_blank" rel="noopener noreferrer">View Page</a>
+                  </div>
+                </div>
+              </div>
+            `;
+          })
+          .join('')}
+      </div>
+    `;
+
+    // Hook up per-card buttons
+    container.querySelectorAll('[data-refresh]').forEach((btn) => {
+      btn.addEventListener('click', () => refreshOrganization(btn.getAttribute('data-refresh')));
+    });
+    container.querySelectorAll('[data-retry]').forEach((btn) => {
+      btn.addEventListener('click', () => refreshOrganization(btn.getAttribute('data-retry')));
+    });
+  }
+
+  function updateSummary() {
+    const orgArray = Object.values(organizations);
+    const totalRaised = orgArray.reduce((sum, org) => sum + (org.total || 0), 0);
+    const totalDonors = orgArray.reduce((sum, org) => sum + (org.donors || 0), 0);
+    const avgGift = totalDonors > 0 ? totalRaised / totalDonors : 0;
+
+    $('#totalRaised') && ($('#totalRaised').textContent = formatCurrency(totalRaised));
+    $('#totalDonors') && ($('#totalDonors').textContent = formatNumber(totalDonors));
+    $('#avgGift') && ($('#avgGift').textContent = formatCurrency(avgGift));
+    $('#orgCount') && ($('#orgCount').textContent = formatNumber(orgArray.length));
+    $('#headerDescription') && ($('#headerDescription').textContent = `Tracking your ${formatNumber(orgArray.length)} selected North Texas organizations`);
+  }
+
+  function setStatusActive(active, intervalSec) {
+    const indicator = $('#statusIndicator');
+    const statusText = $('#statusText');
+    if (!indicator || !statusText) return;
+    indicator.classList.toggle('active', !!active);
+    statusText.textContent = active ? `Auto-refreshing every ${intervalSec}s` : 'Auto-refresh stopped';
+  }
+
+  function markLastUpdate() {
+    const el = $('#lastUpdate');
+    if (el) el.textContent = `Updated at ${new Date().toLocaleTimeString()}`;
+  }
+
+  // ===== Data Flow =====
+  async function loadOrganizations() {
+    try {
+      const data = await apiCall('/organizations');
+      organizations = data || {};
+      renderOrganizations();
+      updateSummary();
     } catch (e) {
-      lastErr = e;
-      const status = e.response?.status;
-      if (status === 429 || status >= 500) {
-        await sleep(1500 * (i + 1));
-        continue;
-      }
-      break;
-    }
-  }
-  throw lastErr;
-}
-
-/* ===================== Parser ===================== */
-function extractFundraisingData(html, orgId) {
-  const $ = cheerio.load(html);
-  let total = 0, donors = 0, goal = 0;
-
-  // 1) Try targeted phrases like "raised $123"
-  const candidates = [];
-  $('*').each((_, el) => {
-    const t = $(el).text().trim();
-    if (!t) return;
-    if (/raised/i.test(t) && /\$\s*[\d,]+(?:\.\d{2})?/.test(t)) candidates.push(t);
-  });
-
-  const pickDollar = (arr) => {
-    const nums = arr.flatMap(t => t.match(/\$\s*[\d,]+(?:\.\d{2})?/g) || []);
-    const parsed = nums.map(n => parseFloat(n.replace(/[\$\s,]/g, ''))).filter(Number.isFinite);
-    return parsed.length ? Math.max(...parsed) : 0;
-  };
-  total = pickDollar(candidates);
-
-  // 2) Donors & goal from body text
-  const body = $('body').text();
-  const donorMatch = body.match(/(\d{1,3}(?:,\d{3})*|\d+)\s+(donor|supporter|giver)s?/i);
-  if (donorMatch) donors = parseInt(donorMatch[1].replace(/,/g, ''), 10) || 0;
-
-  const goalMatch = body.match(/goal[:\s]*\$?\s*([\d,]+)/i);
-  if (goalMatch) goal = parseInt(goalMatch[1].replace(/,/g, ''), 10) || 0;
-
-  // 3) Fallback: choose a median-ish dollar if nothing clear
-  if (!total) {
-    const anyDollars = body.match(/\$\s*[\d,]+(?:\.\d{2})?/g) || [];
-    const parsed = anyDollars.map(n => parseFloat(n.replace(/[\$\s,]/g, ''))).filter(Number.isFinite);
-    if (parsed.length) {
-      parsed.sort((a, b) => a - b);
-      total = parsed[Math.floor(parsed.length / 2)];
+      showToast(`Failed to load organizations: ${e.message}`, 'error');
     }
   }
 
-  return {
-    total: total || 0,
-    donors: donors || 0,
-    goal: goal || 0,
-    lastUpdated: new Date().toISOString(),
-    error: null
-  };
-}
-
-/* ===================== Seed loader (+ /api/reseed) ===================== */
-function loadSeeds({ replace = false } = {}) {
-  // Config path is one level up from /server
-  const seedPath = path.join(__dirname, '..', 'config', 'organizations.json');
-  if (!fs.existsSync(seedPath)) {
-    return { loaded: 0, total: Object.keys(organizationsData).length, message: 'No seed file found' };
-  }
-  const seeds = JSON.parse(fs.readFileSync(seedPath, 'utf8'));
-  if (!Array.isArray(seeds)) {
-    return { loaded: 0, total: Object.keys(organizationsData).length, message: 'Seed file must be an array' };
-  }
-
-  if (replace) organizationsData = {};
-
-  let loaded = 0;
-  for (const s of seeds) {
-    if (!s?.url || !isValidOrgUrl(s.url)) continue;
-    const id = urlToId(s.url);
-    if (!organizationsData[id]) {
-      organizationsData[id] = {
-        id,
-        url: s.url,
-        name: s.name || id.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
-        total: 0,
-        donors: 0,
-        goal: 0,
-        lastUpdated: null,
-        error: null
-      };
-      loaded++;
+  async function refreshAll() {
+    const btn = $('#refreshNowBtn');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Refreshing…';
     }
-  }
-  return { loaded, total: Object.keys(organizationsData).length, message: 'Seeds loaded' };
-}
-
-// Boot-time seed load (works both locally and on Vercel function cold start)
-try {
-  const { loaded, total, message } = loadSeeds();
-  console.log(`${message}: added ${loaded}, now tracking ${total} orgs`);
-} catch (e) {
-  console.error('Failed to load seeds:', e.message);
-}
-
-/* ===================== Routes ===================== */
-app.get('/api/organizations', (req, res) => {
-  res.json(organizationsData);
-});
-
-app.post('/api/organizations', async (req, res) => {
-  const { url, name } = req.body || {};
-  if (!isValidOrgUrl(url)) {
-    return res.status(400).json({ error: 'Invalid URL. Must be a North Texas Giving Day organization URL.' });
-  }
-  const id = urlToId(url);
-  if (organizationsData[id]) return res.json(organizationsData[id]);
-
-  try {
-    const response = await getWithRetry(url, 2);
-    const data = extractFundraisingData(response.data, id);
-    organizationsData[id] = {
-      id,
-      url,
-      name: name || id.replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
-      ...data
-    };
-    res.status(201).json(organizationsData[id]);
-  } catch (error) {
-    console.error(`Error fetching data for ${url}:`, error.message);
-    res.status(502).json({ error: `Failed to fetch organization data: ${error.message}` });
-  }
-});
-
-app.put('/api/organizations/:id/refresh', async (req, res) => {
-  const { id } = req.params;
-  const org = organizationsData[id];
-  if (!org) return res.status(404).json({ error: 'Organization not found' });
-
-  try {
-    const response = await getWithRetry(org.url, 2);
-    const data = extractFundraisingData(response.data, id);
-
-    // Preserve last good data if new parse looks bogus
-    organizationsData[id] = {
-      ...org,
-      total: (data.total || 0) > 0 ? data.total : org.total,
-      donors: (data.donors || 0) > 0 ? data.donors : org.donors,
-      goal: data.goal || org.goal,
-      lastUpdated: new Date().toISOString(),
-      error: null
-    };
-    res.json(organizationsData[id]);
-  } catch (error) {
-    console.error(`Error refreshing data for ${id}:`, error.message);
-    organizationsData[id].error = `Failed to refresh: ${error.message}`;
-    organizationsData[id].lastUpdated = new Date().toISOString();
-    res.status(502).json(organizationsData[id]);
-  }
-});
-
-// Bulk refresh with pacing — be mindful of Vercel function timeout
-app.put('/api/organizations/refresh', async (req, res) => {
-  const results = {};
-  const ids = Object.keys(organizationsData);
-
-  for (const id of ids) {
-    const org = organizationsData[id];
     try {
-      const response = await getWithRetry(org.url, 2);
-      const data = extractFundraisingData(response.data, id);
-
-      organizationsData[id] = {
-        ...org,
-        total: (data.total || 0) > 0 ? data.total : org.total,
-        donors: (data.donors || 0) > 0 ? data.donors : org.donors,
-        goal: data.goal || org.goal,
-        lastUpdated: new Date().toISOString(),
-        error: null
-      };
-      results[id] = 'success';
-    } catch (error) {
-      console.error(`Error refreshing ${id}:`, error.message);
-      organizationsData[id].error = `Failed to refresh: ${error.message}`;
-      organizationsData[id].lastUpdated = new Date().toISOString();
-      results[id] = 'error';
+      const result = await apiCall('/organizations/refresh', { method: 'PUT' });
+      if (result && result.data) {
+        organizations = result.data;
+        renderOrganizations();
+        updateSummary();
+        markLastUpdate();
+        showToast('All organizations refreshed');
+      } else {
+        throw new Error('Unexpected response');
+      }
+    } catch (e) {
+      showToast(`Bulk refresh failed: ${e.message}`, 'error');
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = 'Refresh Now';
+      }
     }
-    // On serverless, long delays can cause timeouts; keep this small if needed.
-    await sleep(400);
   }
 
-  res.json({ message: 'Bulk refresh completed', results, data: organizationsData });
-});
+  async function refreshOrganization(id) {
+    const card = document.querySelector(`.org-card[data-org-id="${id}"]`);
+    const btn = card ? card.querySelector('[data-refresh]') : null;
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Refreshing…';
+      btn.setAttribute('aria-busy', 'true');
+    }
+    try {
+      const org = await apiCall(`/organizations/${encodeURIComponent(id)}/refresh`, { method: 'PUT' });
+      organizations[id] = org;
+      renderOrganizations();
+      updateSummary();
+      markLastUpdate();
+      showToast(`${org.name || id} refreshed`);
+    } catch (e) {
+      if (organizations[id]) {
+        organizations[id].error = `Failed to refresh: ${e.message}`;
+        organizations[id].lastUpdated = new Date().toISOString();
+        renderOrganizations();
+      }
+      showToast(`Failed to refresh ${id}: ${e.message}`, 'error');
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = 'Refresh';
+        btn.removeAttribute('aria-busy');
+      }
+    }
+  }
 
-// Delete
-app.delete('/api/organizations/:id', (req, res) => {
-  const { id } = req.params;
-  if (!organizationsData[id]) return res.status(404).json({ error: 'Organization not found' });
-  delete organizationsData[id];
-  res.json({ message: `Deleted organization ${id}` });
-});
+  function startMonitoring() {
+    if (Object.keys(organizations).length === 0) {
+      showToast('No organizations loaded yet', 'error');
+      return;
+    }
+    const input = $('#refreshInterval');
+    const seconds = Math.max(30, Math.min(600, parseInt(input?.value || '90', 10) || 90));
 
-// Summary
-app.get('/api/summary', (req, res) => {
-  const orgs = Object.values(organizationsData);
-  const totalRaised = orgs.reduce((sum, org) => sum + (org.total || 0), 0);
-  const totalDonors = orgs.reduce((sum, org) => sum + (org.donors || 0), 0);
-  const totalGoal = orgs.reduce((sum, org) => sum + (org.goal || 0), 0);
+    if (monitoringInterval) clearInterval(monitoringInterval);
+    isMonitoring = true;
+    setStatusActive(true, seconds);
+    $('#startBtn') && ($('#startBtn').style.display = 'none');
+    $('#stopBtn') && ($('#stopBtn').style.display = 'inline-block');
 
-  res.json({
-    organizationCount: orgs.length,
-    totalRaised,
-    totalDonors,
-    totalGoal,
-    averageGift: totalDonors > 0 ? Math.round((totalRaised / totalDonors) * 100) / 100 : 0,
-    lastUpdated: new Date().toISOString()
-  });
-});
+    refreshAll(); // do one immediately
+    monitoringInterval = setInterval(refreshAll, seconds * 1000);
+    showToast(`Auto-refresh started (${seconds}s)`);
+  }
 
-// CSV export
-app.get('/api/export.csv', (req, res) => {
-  const rows = [['id', 'name', 'url', 'donors', 'total', 'goal', 'lastUpdated', 'error']];
-  for (const o of Object.values(organizationsData)) {
-    rows.push([
-      o.id,
-      o.name,
-      o.url,
-      o.donors || 0,
+  function stopMonitoring() {
+    isMonitoring = false;
+    if (monitoringInterval) clearInterval(monitoringInterval);
+    monitoringInterval = null;
+    setStatusActive(false);
+    $('#startBtn') && ($('#startBtn').style.display = 'inline-block');
+    $('#stopBtn') && ($('#stopBtn').style.display = 'none');
+    showToast('Auto-refresh stopped');
+  }
+
+  function exportData() {
+    const orgArray = Object.values(organizations);
+    const totalRaised = orgArray.reduce((sum, org) => sum + (org.total || 0), 0);
+    const totalDonors = orgArray.reduce((sum, org) => sum + (org.donors || 0), 0);
+
+    const payload = {
+      exportDate: new Date().toISOString(),
+      timestamp: new Date().toLocaleString(),
+      organizations,
+      summary: {
+        totalRaised,
+        totalDonors,
+        organizationCount: orgArray.length,
+        averageGift: totalDonors > 0 ? Math.round((totalRaised / totalDonors) * 100) / 100 : 0
+      }
+    };
+
+    // JSON file
+    const jsonBlob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const jsonUrl = URL_.createObjectURL(jsonBlob);
+    const jsonLink = document.createElement('a');
+    jsonLink.href = jsonUrl;
+    jsonLink.download = `ntgd-data-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+
+    // CSV file
+    const headers = ['Organization', 'Total Raised', 'Donors', 'Average Gift', 'Goal Progress %', 'Last Updated', 'Status'];
+    const rows = orgArray.map((o) => [
+      o.name || o.id,
       o.total || 0,
-      o.goal || 0,
-      o.lastUpdated || '',
-      o.error || ''
+      o.donors || 0,
+      o.donors > 0 ? Math.round((o.total / o.donors) * 100) / 100 : 0,
+      o.goal > 0 ? Math.round((o.total / o.goal) * 100) : 0,
+      o.lastUpdated ? new Date(o.lastUpdated).toLocaleString() : 'Never',
+      o.error ? 'Error' : 'OK'
     ]);
-  }
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', 'attachment; filename="ntgd-organizations.csv"');
-  res.send(rows.map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n'));
-});
+    const csvContent = [headers, ...rows].map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(',')).join('\n');
+    const csvBlob = new Blob([csvContent], { type: 'text/csv' });
+    const csvUrl = URL_.createObjectURL(csvBlob);
+    const csvLink = document.createElement('a');
+    csvLink.href = csvUrl;
+    csvLink.download = `ntgd-data-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
 
-// Reseed endpoint (auth via RESEED_TOKEN)
-app.post('/api/reseed', (req, res) => {
-  const token = req.query.token || req.headers['x-reseed-token'];
-  if (!process.env.RESEED_TOKEN) {
-    return res.status(501).json({ error: 'RESEED_TOKEN not configured on server' });
-  }
-  if (token !== process.env.RESEED_TOKEN) {
-    return res.status(401).json({ error: 'Unauthorized' });
+    // Trigger downloads (JSON then CSV)
+    document.body.appendChild(jsonLink);
+    document.body.appendChild(csvLink);
+    jsonLink.click();
+    setTimeout(() => csvLink.click(), 100);
+    jsonLink.remove();
+    csvLink.remove();
+
+    URL_.revokeObjectURL(jsonUrl);
+    URL_.revokeObjectURL(csvUrl);
+
+    showToast('Exported JSON + CSV');
   }
 
-  const replace = String(req.query.replace || '').toLowerCase() === 'true';
-  try {
-    const result = loadSeeds({ replace });
-    return res.json({ replaced: replace, ...result, data: organizationsData });
-  } catch (e) {
-    return res.status(500).json({ error: e.message });
-  }
-});
+  // ===== Wire up UI =====
+  function bindEvents() {
+    $('#startBtn')?.addEventListener('click', startMonitoring);
+    $('#stopBtn')?.addEventListener('click', stopMonitoring);
+    $('#refreshNowBtn')?.addEventListener('click', refreshAll);
+    $('#exportBtn')?.addEventListener('click', exportData);
 
-module.exports = app;
+    // Background refresh every 10 minutes when not monitoring
+    setInterval(() => {
+      if (!isMonitoring && Object.keys(organizations).length > 0) {
+        refreshAll();
+      }
+    }, 600_000);
+  }
+
+  // ===== Init =====
+  document.addEventListener('DOMContentLoaded', async () => {
+    bindEvents();
+    await loadOrganizations();
+  });
+})();

@@ -1,239 +1,265 @@
-// server/app.js
+// North Texas Giving Day Monitor Backend
+// Run with: node server.js
+
 const express = require('express');
 const cors = require('cors');
-const helmet = require('helmet');
-let rateLimit; try { rateLimit = require('express-rate-limit'); } catch (_) {}
 const axios = require('axios');
 const cheerio = require('cheerio');
 const path = require('path');
-const fs = require('fs');
-const { URL } = require('url');
 
 const app = express();
+const PORT = process.env.PORT || 3001;
 
-/* -------- Security & middleware -------- */
-const ALLOWED = (process.env.ALLOWED_ORIGINS || '')
-  .split(',').map(s => s.trim()).filter(Boolean);
-
-app.use(helmet());
-app.use(cors({ origin: ALLOWED.length ? ALLOWED : '*' }));
+// Middleware
+app.use(cors());
 app.use(express.json());
+app.use(express.static('public'));
 
-// static for local dev; on Vercel, /public is routed by vercel.json
-app.use(express.static(path.join(__dirname, '..', 'public')));
-
-if (rateLimit) {
-  app.use(rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false }));
-}
-
-/* -------- In-memory store -------- */
+// Store organization data in memory (use database in production)
 let organizationsData = {};
 
-/* -------- Helpers -------- */
-const UA_HEADERS = { 'User-Agent': 'NTXGD-Monitor/1.0 (+https://example.com)' };
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-function isValidOrgUrl(raw) {
-  try {
-    const u = new URL(raw);
-    if (u.protocol !== 'https:' || u.hostname !== 'www.northtexasgivingday.org') return false;
-    const parts = u.pathname.split('/').filter(Boolean);
-    return parts.length === 2 && parts[0] === 'organization' && parts[1].length > 0;
-  } catch { return false; }
-}
-function urlToId(raw) {
-  const u = new URL(raw);
-  return u.pathname.split('/').filter(Boolean)[1].toLowerCase();
-}
-async function getWithRetry(url, tries = 2) {
-  let lastErr;
-  for (let i = 0; i < tries; i++) {
-    try { return await axios.get(url, { headers: UA_HEADERS, timeout: 12000 }); }
-    catch (e) {
-      lastErr = e; const s = e.response?.status;
-      if (s === 429 || s >= 500) { await sleep(1500 * (i + 1)); continue; }
-      break;
+// Function to extract fundraising data from HTML
+function extractFundraisingData(html, orgId) {
+    const $ = cheerio.load(html);
+    
+    let total = 0;
+    let donors = 0;
+    let goal = 0;
+    
+    // Common patterns for fundraising totals
+    const totalSelectors = [
+        '[class*="raised"]',
+        '[class*="total"]',
+        '[class*="amount"]',
+        '[id*="raised"]',
+        '[id*="total"]',
+        '.donation-total',
+        '.fundraising-total',
+        '.campaign-total'
+    ];
+    
+    // Common patterns for donor counts
+    const donorSelectors = [
+        '[class*="donor"]',
+        '[class*="supporter"]',
+        '[class*="giver"]',
+        '.donor-count',
+        '.supporter-count'
+    ];
+    
+    // Common patterns for goals
+    const goalSelectors = [
+        '[class*="goal"]',
+        '[class*="target"]',
+        '.campaign-goal',
+        '.fundraising-goal'
+    ];
+    
+    // Extract amounts using regex patterns
+    const text = $('body').text();
+    const dollarAmounts = text.match(/\$[\d,]+\.?\d*/g) || [];
+    const numberPatterns = text.match(/[\d,]+/g) || [];
+    
+    // Try to find the largest dollar amount (likely the total)
+    if (dollarAmounts.length > 0) {
+        const amounts = dollarAmounts.map(amt => 
+            parseFloat(amt.replace(/[\$,]/g, ''))
+        ).filter(amt => !isNaN(amt));
+        
+        if (amounts.length > 0) {
+            total = Math.max(...amounts);
+        }
     }
-  } throw lastErr;
-}
-
-/* -------- Parser -------- */
-function extractFundraisingData(html) {
-  const $ = cheerio.load(html);
-  let total = 0, donors = 0, goal = 0;
-
-  const candidates = [];
-  $('*').each((_, el) => {
-    const t = $(el).text().trim();
-    if (t && /raised/i.test(t) && /\$\s*[\d,]+(?:\.\d{2})?/.test(t)) candidates.push(t);
-  });
-
-  const pickDollar = (arr) => {
-    const nums = arr.flatMap(t => t.match(/\$\s*[\d,]+(?:\.\d{2})?/g) || []);
-    const parsed = nums.map(n => parseFloat(n.replace(/[\$\s,]/g, ''))).filter(Number.isFinite);
-    return parsed.length ? Math.max(...parsed) : 0;
-  };
-  total = pickDollar(candidates);
-
-  const body = $('body').text();
-  const donorMatch = body.match(/(\d{1,3}(?:,\d{3})*|\d+)\s+(donor|supporter|giver)s?/i);
-  if (donorMatch) donors = parseInt(donorMatch[1].replace(/,/g, ''), 10) || 0;
-
-  const goalMatch = body.match(/goal[:\s]*\$?\s*([\d,]+)/i);
-  if (goalMatch) goal = parseInt(goalMatch[1].replace(/,/g, ''), 10) || 0;
-
-  if (!total) {
-    const any = body.match(/\$\s*[\d,]+(?:\.\d{2})?/g) || [];
-    const nums = any.map(n => parseFloat(n.replace(/[\$\s,]/g, ''))).filter(Number.isFinite);
-    if (nums.length) {
-      nums.sort((a,b)=>a-b);
-      total = nums[Math.floor(nums.length/2)];
+    
+    // Look for donor count patterns
+    const donorMatches = text.match(/(\d+)\s+(donor|supporter|giver)s?/gi);
+    if (donorMatches && donorMatches.length > 0) {
+        donors = parseInt(donorMatches[0].match(/\d+/)[0]);
     }
-  }
-
-  return { total: total||0, donors: donors||0, goal: goal||0, lastUpdated: new Date().toISOString(), error: null };
-}
-
-/* -------- Seeds + /api/reseed -------- */
-function loadSeeds({ replace = false } = {}) {
-  const seedPath = path.join(__dirname, '..', 'config', 'organizations.json');
-  if (!fs.existsSync(seedPath)) return { loaded: 0, total: Object.keys(organizationsData).length, message: 'No seed file found' };
-  const seeds = JSON.parse(fs.readFileSync(seedPath, 'utf8'));
-  if (!Array.isArray(seeds)) return { loaded: 0, total: Object.keys(organizationsData).length, message: 'Seed file must be an array' };
-  if (replace) organizationsData = {};
-  let loaded = 0;
-  for (const s of seeds) {
-    if (!s?.url || !isValidOrgUrl(s.url)) continue;
-    const id = urlToId(s.url);
-    if (!organizationsData[id]) {
-      organizationsData[id] = {
-        id, url: s.url, name: s.name || id.replace(/-/g,' ').replace(/\b\w/g,c=>c.toUpperCase()),
-        total: 0, donors: 0, goal: 0, lastUpdated: null, error: null
-      };
-      loaded++;
+    
+    // Look for goal patterns
+    const goalMatches = text.match(/goal[:\s]*\$?([\d,]+)/gi);
+    if (goalMatches && goalMatches.length > 0) {
+        goal = parseInt(goalMatches[0].match(/[\d,]+/)[0].replace(/,/g, ''));
     }
-  }
-  return { loaded, total: Object.keys(organizationsData).length, message: 'Seeds loaded' };
-}
-try {
-  const { loaded, total, message } = loadSeeds();
-  console.log(`${message}: added ${loaded}, now tracking ${total} orgs`);
-} catch (e) { console.error('Failed to load seeds:', e.message); }
-
-/* -------- Routes -------- */
-app.get('/api/organizations', (req,res)=> res.json(organizationsData));
-
-app.post('/api/organizations', async (req,res)=>{
-  const { url, name } = req.body || {};
-  if (!isValidOrgUrl(url)) return res.status(400).json({ error: 'Invalid URL. Must be a North Texas Giving Day organization URL.' });
-  const id = urlToId(url);
-  if (organizationsData[id]) return res.json(organizationsData[id]);
-  try {
-    const resp = await getWithRetry(url, 2);
-    const data = extractFundraisingData(resp.data);
-    organizationsData[id] = { id, url, name: name || id.replace(/-/g,' ').replace(/\b\w/g,l=>l.toUpperCase()), ...data };
-    res.status(201).json(organizationsData[id]);
-  } catch (e) {
-    console.error(`Error fetching data for ${url}:`, e.message);
-    res.status(502).json({ error: `Failed to fetch organization data: ${e.message}` });
-  }
-});
-
-app.put('/api/organizations/:id/refresh', async (req,res)=>{
-  const { id } = req.params;
-  const org = organizationsData[id];
-  if (!org) return res.status(404).json({ error: 'Organization not found' });
-  try {
-    const resp = await getWithRetry(org.url, 2);
-    const data = extractFundraisingData(resp.data);
-    organizationsData[id] = {
-      ...org,
-      total: (data.total||0) > 0 ? data.total : org.total,
-      donors: (data.donors||0) > 0 ? data.donors : org.donors,
-      goal: data.goal || org.goal,
-      lastUpdated: new Date().toISOString(),
-      error: null
-    };
-    res.json(organizationsData[id]);
-  } catch (e) {
-    console.error(`Error refreshing ${id}:`, e.message);
-    organizationsData[id].error = `Failed to refresh: ${e.message}`;
-    organizationsData[id].lastUpdated = new Date().toISOString();
-    res.status(502).json(organizationsData[id]);
-  }
-});
-
-app.put('/api/organizations/refresh', async (req,res)=>{
-  const results = {};
-  for (const id of Object.keys(organizationsData)) {
-    const org = organizationsData[id];
-    try {
-      const resp = await getWithRetry(org.url, 2);
-      const data = extractFundraisingData(resp.data);
-      organizationsData[id] = {
-        ...org,
-        total: (data.total||0) > 0 ? data.total : org.total,
-        donors: (data.donors||0) > 0 ? data.donors : org.donors,
-        goal: data.goal || org.goal,
+    
+    return {
+        total: total || 0,
+        donors: donors || 0,
+        goal: goal || 0,
         lastUpdated: new Date().toISOString(),
         error: null
-      };
-      results[id] = 'success';
-    } catch (e) {
-      console.error(`Error refreshing ${id}:`, e.message);
-      organizationsData[id].error = `Failed to refresh: ${e.message}`;
-      organizationsData[id].lastUpdated = new Date().toISOString();
-      results[id] = 'error';
+    };
+}
+
+// API Routes
+app.get('/api/organizations', (req, res) => {
+    res.json(organizationsData);
+});
+
+app.post('/api/organizations', async (req, res) => {
+    const { url } = req.body;
+    
+    if (!url || !url.includes('northtexasgivingday.org/organization/')) {
+        return res.status(400).json({ 
+            error: 'Invalid URL. Must be a North Texas Giving Day organization URL.' 
+        });
     }
-    await sleep(400); // keep small for serverless
-  }
-  res.json({ message: 'Bulk refresh completed', results, data: organizationsData });
+    
+    try {
+        const orgId = url.split('/organization/')[1];
+        const orgName = orgId.replace(/-/g, ' ')
+            .replace(/\b\w/g, l => l.toUpperCase());
+        
+        // Fetch the organization page
+        const response = await axios.get(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            },
+            timeout: 10000
+        });
+        
+        const data = extractFundraisingData(response.data, orgId);
+        
+        organizationsData[orgId] = {
+            id: orgId,
+            url: url,
+            name: orgName,
+            ...data
+        };
+        
+        res.json(organizationsData[orgId]);
+        
+    } catch (error) {
+        console.error(`Error fetching data for ${url}:`, error.message);
+        res.status(500).json({ 
+            error: `Failed to fetch organization data: ${error.message}` 
+        });
+    }
 });
 
-app.delete('/api/organizations/:id', (req,res)=>{
-  const { id } = req.params;
-  if (!organizationsData[id]) return res.status(404).json({ error: 'Organization not found' });
-  delete organizationsData[id];
-  res.json({ message: `Deleted organization ${id}` });
+app.put('/api/organizations/:id/refresh', async (req, res) => {
+    const { id } = req.params;
+    const org = organizationsData[id];
+    
+    if (!org) {
+        return res.status(404).json({ error: 'Organization not found' });
+    }
+    
+    try {
+        const response = await axios.get(org.url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            },
+            timeout: 10000
+        });
+        
+        const data = extractFundraisingData(response.data, id);
+        organizationsData[id] = { ...org, ...data };
+        
+        res.json(organizationsData[id]);
+        
+    } catch (error) {
+        console.error(`Error refreshing data for ${id}:`, error.message);
+        organizationsData[id].error = `Failed to refresh: ${error.message}`;
+        organizationsData[id].lastUpdated = new Date().toISOString();
+        
+        res.status(500).json(organizationsData[id]);
+    }
 });
 
-app.get('/api/summary', (req,res)=>{
-  const orgs = Object.values(organizationsData);
-  const totalRaised = orgs.reduce((s,o)=>s+(o.total||0),0);
-  const totalDonors = orgs.reduce((s,o)=>s+(o.donors||0),0);
-  const totalGoal   = orgs.reduce((s,o)=>s+(o.goal||0),0);
-  res.json({
-    organizationCount: orgs.length,
-    totalRaised,
-    totalDonors,
-    totalGoal,
-    averageGift: totalDonors>0 ? Math.round((totalRaised/totalDonors)*100)/100 : 0,
-    lastUpdated: new Date().toISOString()
-  });
+app.delete('/api/organizations/:id', (req, res) => {
+    // Remove delete functionality since organizations are pre-configured
+    res.status(405).json({ error: 'Organizations cannot be removed - they are pre-configured' });
 });
 
-app.get('/api/export.csv', (req,res)=>{
-  const rows = [['id','name','url','donors','total','goal','lastUpdated','error']];
-  for (const o of Object.values(organizationsData)) {
-    rows.push([o.id,o.name,o.url,o.donors||0,o.total||0,o.goal||0,o.lastUpdated||'',o.error||'']);
-  }
-  res.setHeader('Content-Type','text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition','attachment; filename="ntgd-organizations.csv"');
-  res.send(rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n'));
+// Bulk refresh endpoint
+app.put('/api/organizations/refresh', async (req, res) => {
+    const results = {};
+    
+    for (const [id, org] of Object.entries(organizationsData)) {
+        try {
+            const response = await axios.get(org.url, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                },
+                timeout: 10000
+            });
+            
+            const data = extractFundraisingData(response.data, id);
+            organizationsData[id] = { ...org, ...data };
+            results[id] = 'success';
+            
+        } catch (error) {
+            console.error(`Error refreshing ${id}:`, error.message);
+            organizationsData[id].error = `Failed to refresh: ${error.message}`;
+            organizationsData[id].lastUpdated = new Date().toISOString();
+            results[id] = 'error';
+        }
+        
+        // Add delay between requests to be respectful
+        await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    
+    res.json({ 
+        message: 'Bulk refresh completed',
+        results,
+        data: organizationsData 
+    });
 });
 
-// Reseed (protect with RESEED_TOKEN)
-app.post('/api/reseed', (req,res)=>{
-  const token = req.query.token || req.headers['x-reseed-token'];
-  if (!process.env.RESEED_TOKEN) return res.status(501).json({ error: 'RESEED_TOKEN not configured on server' });
-  if (token !== process.env.RESEED_TOKEN) return res.status(401).json({ error: 'Unauthorized' });
-  const replace = String(req.query.replace||'').toLowerCase()==='true';
-  try {
-    const result = loadSeeds({ replace });
-    res.json({ replaced: replace, ...result, data: organizationsData });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+// Get summary statistics with safe division
+app.get('/api/summary', (req, res) => {
+    const orgs = Object.values(organizations);
+    const totalRaised = orgs.reduce((sum, org) => sum + (org.total || 0), 0);
+    const totalDonors = orgs.reduce((sum, org) => sum + (org.donors || 0), 0);
+    const totalGoal = orgs.reduce((sum, org) => sum + (org.goal || 0), 0);
+    
+    res.json({
+        organizationCount: orgs.length,
+        totalRaised,
+        totalDonors,
+        totalGoal,
+        averageGift: totalDonors > 0 ? Math.round((totalRaised / totalDonors) * 100) / 100 : 0,
+        lastUpdated: new Date().toISOString()
+    });
 });
 
+// CSV export endpoint
+app.get('/api/export.csv', (req, res) => {
+    const rows = [['id', 'name', 'url', 'donors', 'total', 'goal', 'lastUpdated', 'error']];
+    for (const o of Object.values(organizations)) {
+        rows.push([
+            o.id, 
+            o.name, 
+            o.url, 
+            o.donors || 0, 
+            o.total || 0, 
+            o.goal || 0,
+            o.lastUpdated || '', 
+            o.error || ''
+        ]);
+    }
+    
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="ntgd-organizations.csv"');
+    res.send(rows.map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n'));
+});
+
+// Serve the frontend
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// Start server only if this file is run directly (not imported for testing)
+if (require.main === module) {
+    app.listen(PORT, () => {
+        console.log(`✅ Seeded ${Object.keys(organizations).length} organizations from config/organizations.json`);
+        console.log(`North Texas Giving Day Monitor server running on port ${PORT}`);
+        console.log(`Frontend available at: http://localhost:${PORT}`);
+        console.log(`API available at: http://localhost:${PORT}/api`);
+    });
+}
+
+// Export for testing
 module.exports = app;

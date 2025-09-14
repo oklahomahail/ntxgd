@@ -1,13 +1,16 @@
 cat > server/app.js <<'EOF'
-// server/app.js (hard-wired orgs)
+// server/app.js (hard-wired orgs, crash-proof requires)
 'use strict';
 
 const express = require('express');
-const cors = require('cors');
-const helmet = require('helmet');
-let rateLimit; try { rateLimit = require('express-rate-limit'); } catch (_) {}
-const axios = require('axios');
-const cheerio = require('cheerio');
+
+// Safe imports (fall back to no-ops so the function can't crash at boot)
+let cors;   try { cors   = require('cors');   } catch { cors   = () => (req,res,next)=>next(); }
+let helmet; try { helmet = require('helmet'); } catch { helmet = () => (req,res,next)=>next(); }
+let rateLimit; try { rateLimit = require('express-rate-limit'); } catch { rateLimit = null; }
+let axios;  try { axios  = require('axios');  } catch { axios  = null; }
+let cheerio;try { cheerio= require('cheerio');} catch { cheerio= null; }
+
 const path = require('path');
 
 const HARDCODED_ORGS = [
@@ -24,13 +27,15 @@ const HARDCODED_ORGS = [
 const UA_HEADERS = { 'User-Agent': 'NTXGD-Monitor/1.0 (+vercel)' };
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-// More reliable than new URL(...) for serverless; pulls slug after /organization/
+// Safer slug extractor for /organization/<slug>
 function urlToId(raw) {
   const m = String(raw).match(/\/organization\/([^/?#]+)/i);
   return m ? m[1].toLowerCase() : '';
 }
 
+// Best-effort HTML fetch with backoff
 async function getWithRetry(url, tries = 2) {
+  if (!axios) throw new Error('axios not available');
   let lastErr;
   for (let i = 0; i < tries; i++) {
     try {
@@ -45,11 +50,12 @@ async function getWithRetry(url, tries = 2) {
   throw lastErr;
 }
 
+// Parse totals from HTML
 function extractFundraisingData(html) {
+  if (!cheerio) return { total: 0, donors: 0, goal: 0, lastUpdated: new Date().toISOString(), error: 'cheerio not available' };
   const $ = cheerio.load(html);
   let total = 0, donors = 0, goal = 0;
 
-  // Prefer amounts near "raised"
   const candidates = [];
   $('*').each((_, el) => {
     const t = $(el).text().trim();
@@ -67,51 +73,42 @@ function extractFundraisingData(html) {
   const goalMatch = body.match(/goal[:\s]*\$?\s*([\d,]+)/i);
   if (goalMatch) goal = parseInt(goalMatch[1].replace(/,/g, ''), 10) || 0;
 
-  // Fallback: median-ish of any dollar amounts on the page
   if (!total) {
     const any = body.match(/\$\s*[\d,]+(?:\.\d{2})?/g) || [];
     const nums = any.map(n => parseFloat(n.replace(/[\$\s,]/g, ''))).filter(Number.isFinite);
-    if (nums.length) {
-      nums.sort((a,b)=>a-b);
-      total = nums[Math.floor(nums.length/2)];
-    }
+    if (nums.length) { nums.sort((a,b)=>a-b); total = nums[Math.floor(nums.length/2)]; }
   }
-
   return { total: total||0, donors: donors||0, goal: goal||0, lastUpdated: new Date().toISOString(), error: null };
 }
 
 const app = express();
 
-// Security / CORS
+// Security / JSON / static
 const ALLOWED = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
 app.use(helmet());
 app.use(cors({ origin: ALLOWED.length ? ALLOWED : '*' }));
 app.use(express.json());
-
-// Static (local dev; on Vercel, /public is routed by vercel.json)
+// Static for local; on Vercel, /public is routed by vercel.json
 app.use(express.static(path.join(__dirname, '..', 'public')));
-
-// Basic rate limit (optional)
 if (rateLimit) app.use(rateLimit({ windowMs: 60_000, max: 120, standardHeaders: true, legacyHeaders: false }));
 
-// In-memory store from hard-coded list
+// Seed in memory
 let organizationsData = {};
 for (const { name, url } of HARDCODED_ORGS) {
   const id = urlToId(url);
   if (!id) continue;
   organizationsData[id] = { id, name, url, total: 0, donors: 0, goal: 0, lastUpdated: null, error: null };
 }
-
-// Boot log (visible in Vercel Function Logs)
 console.log('[BOOT] seeded orgs:', Object.keys(organizationsData));
 
-// Debug route to verify seeds in prod
+// Debug + ping
+app.get('/api/ping', (req, res) => res.json({ ok: true, ts: Date.now() }));
 app.get('/api/_debug', (req, res) => {
-  const keys = Object.keys(organizationsData);
-  res.json({ count: keys.length, keys });
+  const keys = Object.keys(organizationsData || {});
+  res.json({ count: keys.length, keys, axios: !!axios, cheerio: !!cheerio });
 });
 
-// Routes
+// API
 app.get('/api/organizations', (req, res) => res.json(organizationsData));
 
 app.post('/api/organizations', (req, res) =>
@@ -126,6 +123,7 @@ app.put('/api/organizations/:id/refresh', async (req, res) => {
   const id = String(req.params.id || '').toLowerCase();
   const org = organizationsData[id];
   if (!org) return res.status(404).json({ error: 'Organization not found' });
+  if (!axios || !cheerio) return res.status(503).json({ ...org, error: 'Scraper unavailable', lastUpdated: new Date().toISOString() });
 
   try {
     const resp = await getWithRetry(org.url, 2);
@@ -150,6 +148,12 @@ app.put('/api/organizations/refresh', async (req, res) => {
   const results = {};
   for (const id of Object.keys(organizationsData)) {
     const org = organizationsData[id];
+    if (!axios || !cheerio) {
+      organizationsData[id].error = 'Scraper unavailable';
+      organizationsData[id].lastUpdated = new Date().toISOString();
+      results[id] = 'skipped';
+      continue;
+    }
     try {
       const resp = await getWithRetry(org.url, 2);
       const data = extractFundraisingData(resp.data);
@@ -187,17 +191,7 @@ app.get('/api/summary', (req, res) => {
   });
 });
 
-app.get('/api/export.csv', (req, res) => {
-  const rows = [['id','name','url','donors','total','goal','lastUpdated','error']];
-  for (const o of Object.values(organizationsData)) {
-    rows.push([o.id,o.name,o.url,o.donors||0,o.total||0,o.goal||0,o.lastUpdated||'',o.error||'']);
-  }
-  res.setHeader('Content-Type','text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition','attachment; filename="ntgd-organizations.csv"');
-  res.send(rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n'));
-});
-
-// Local dev convenience (vercel serves /public via routing)
+// Local dev fallback (Vercel routes /public)
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'index.html')));
 
 module.exports = app;

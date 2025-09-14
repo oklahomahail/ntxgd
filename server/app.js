@@ -51,12 +51,8 @@ async function getWithRetry(url, tries = 2) {
   throw lastErr;
 }
 
-// Robustly parse: "$75,600 raised", "by 18 donors", "$400,000 Goal", and "% complete"
 function extractFundraisingData(html) {
-  if (!cheerio) {
-    return { total: 0, donors: 0, goal: 0, lastUpdated: new Date().toISOString(), error: 'cheerio not available' };
-  }
-
+  if (!cheerio) return { total: 0, donors: 0, goal: 0, lastUpdated: new Date().toISOString(), error: 'cheerio not available' };
   const $ = cheerio.load(html);
   const text = $('body').text().replace(/\s+/g, ' ').trim();
 
@@ -68,33 +64,33 @@ function extractFundraisingData(html) {
 
   let total = 0, donors = 0, goal = 0;
 
-  // Raised: "$75,600 raised" OR "raised $75,600"
+  // "$75,600 raised" OR "raised $75,600"
   const raisedBefore = text.match(/\$\s*([\d,]+(?:\.\d{2})?)\s*raised\b/i);
   const raisedAfter  = text.match(/\braised\s*\$?\s*([\d,]+(?:\.\d{2})?)/i);
   if (raisedBefore) total = toNum(raisedBefore[1]);
   else if (raisedAfter) total = toNum(raisedAfter[1]);
 
-  // Fallback: nearest $ around the word "raised"
+  // Fallback: nearest $ around "raised"
   if (!total) {
     const idx = text.toLowerCase().indexOf('raised');
     if (idx !== -1) {
-      const window = text.slice(Math.max(0, idx - 80), idx + 80);
-      const near = window.match(/\$\s*([\d,]+(?:\.\d{2})?)/);
+      const win = text.slice(Math.max(0, idx - 80), idx + 80);
+      const near = win.match(/\$\s*([\d,]+(?:\.\d{2})?)/);
       if (near) total = toNum(near[1]);
     }
   }
 
-  // Donors: "by 18 donors"
+  // "by 18 donors" (also accept lone "<n> donors")
   const donorsMatch = text.match(/\bby\s+([\d,]+)\s+donors?\b/i) || text.match(/\b([\d,]+)\s+donors?\b/i);
   if (donorsMatch) donors = toNum(donorsMatch[1]);
 
-  // Goal: "$400,000 Goal" OR "Goal $400,000"
+  // "$400,000 Goal" OR "Goal $400,000"
   const goalAfter  = text.match(/\$\s*([\d,]+(?:\.\d{2})?)\s*goal\b/i);
   const goalBefore = text.match(/\bgoal\b[^$]*\$\s*([\d,]+(?:\.\d{2})?)/i);
   if (goalAfter) goal = toNum(goalAfter[1]);
   else if (goalBefore) goal = toNum(goalBefore[1]);
 
-  // If either missing but "% complete" exists, compute from the other
+  // If one is missing but we have "% complete", derive the other
   const pct = text.match(/(\d{1,3})\s*%\s*complete/i);
   if (pct) {
     const p = toNum(pct[1]);
@@ -102,14 +98,9 @@ function extractFundraisingData(html) {
     if (!goal && total && p > 0 && p <= 100) goal = Math.round((total * 100) / p);
   }
 
-  return {
-    total: total || 0,
-    donors: donors || 0,
-    goal: goal || 0,
-    lastUpdated: new Date().toISOString(),
-    error: null
-  };
+  return { total: total || 0, donors: donors || 0, goal: goal || 0, lastUpdated: new Date().toISOString(), error: null };
 }
+
 
 // --------------------------- App ---------------------------
 const app = express();

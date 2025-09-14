@@ -1,53 +1,61 @@
 # NTXGD Monitor
 
-A simple dashboard and API to track a fixed list of North Texas Giving Day organizations.  
-Frontend is static (served from `/public`), backend is a lightweight Express app (exported from `server/app.js`) deployed as Vercel serverless functions.
+Real-time dashboard tracking 8 North Texas Giving Day organizations. Static frontend + Express API deployed on Vercel.
 
----
+## Quick Start
+
+```bash
+npm ci
+npm run dev
+# Open http://localhost:3001
+```
 
 ## Features
 
-- Hard-wired list of 8 orgs (easy to edit in one place)
-- Aggregate totals and average gift
-- Per-org refresh + bulk refresh
-- CSV export
-- Health/debug endpoints
-- Respectful scraping (timeouts, retries, batch delay)
+- Auto-refresh tracking of 8 hardcoded nonprofits
+- Aggregate totals, per-org breakdown, CSV export
+- Respectful scraping with retries and rate limiting
+- Health monitoring and debug endpoints
 
----
+## Organizations Tracked
+
+Edit in `server/app.js` (`config.organizations`):
+- Brother Bill's Helping Hand
+- Casa del Lago  
+- Dallas LIFE
+- The Kessler School
+- CityBridge Health Foundation
+- Dallas Area Rape Crisis Center (DARCC)
+- International Student Foundation (ISF)
+- Girlstart
+
+## API Endpoints
+
+- `GET /api/organizations` - All org data
+- `PUT /api/organizations/refresh` - Refresh all
+- `PUT /api/organizations/:id/refresh` - Refresh one
+- `GET /api/health` - System health
+- `GET /api/export.csv` - Download data
+
+## Configuration
+
+Optional `.env` for tuning:
+```bash
+BATCH_DELAY_MS=500
+REQUEST_TIMEOUT_MS=15000
+MAX_RETRIES=3
+LOG_LEVEL=info
+```
+
+## Deployment
+
+Vercel auto-deploys from GitHub. Requires Node 18.x+.
+
+Set environment variables in Vercel dashboard for production tuning.
 
 ## Tech Stack
 
-- **Frontend:** vanilla HTML/CSS/JS (`public/index.html`, `public/app.js`)
-- **Backend:** Node.js + Express (`server/app.js`)
-- **Deploy:** Vercel (serverless), static assets from `/public`
-
-> **Node Requirement:** Vercel currently requires **Node 22.x**. This repo sets `"engines": { "node": "22.x" }`.
-
----
-
-## Hard-Wired Organizations
-
-Edit the list in **`server/app.js`** (`HARDCODED_ORGS`). Defaults:
-
-- Brother Bill’s Helping Hand — `bbhh`
-- Casa del Lago — `casa-del-lago`
-- Dallas LIFE — `dallas-life-homeless-shelter`
-- The Kessler School — `the-kessler-school`
-- CityBridge Health Foundation — `Citybridge-Health-Foundation`
-- Dallas Area Rape Crisis Center (DARCC) — `darcc`
-- International Student Foundation (ISF) — `ISF`
-- Girlstart — `Girlstart`
-
-Slug is taken from `https://www.northtexasgivingday.org/organization/<slug>`.
-
----
-
-## Local Development
-
-### 1) Install
-
-```bash
-# from repo root
-rm -rf node_modules
-npm ci
+- Frontend: Vanilla HTML/CSS/JS
+- Backend: Node.js + Express
+- Scraping: Axios + Cheerio
+- Deploy: Vercel serverless functions

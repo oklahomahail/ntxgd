@@ -1,7 +1,5 @@
 /* NTXGD front-end */
 (() => {
-  const API_BASE = '';
-
   const els = {
     totalRaised: document.getElementById('totalRaised'),
     totalDonors: document.getElementById('totalDonors'),
@@ -36,7 +34,7 @@
   };
 
   async function api(path, opts) {
-    const res = await fetch(API_BASE + path, { headers: { 'Content-Type':'application/json' }, ...opts });
+    const res = await fetch(path, { headers: { 'Content-Type':'application/json' }, ...opts });
     if (!res.ok) throw new Error(await res.text().catch(()=>res.statusText));
     return res.json();
   }
@@ -56,8 +54,7 @@
   function render() {
     const arr = Object.values(orgs).sort((a,b)=>(b.total||0)-(a.total||0));
     if (!arr.length) {
-      els.orgsContainer.innerHTML = `
-        <div class="loading"><div class="spinner"></div><p>Loading your organizations…</p></div>`;
+      els.orgsContainer.innerHTML = '<div class="loading"><div class="spinner"></div><p>Loading your organizations…</p></div>';
       els.headerDescription && (els.headerDescription.textContent = 'Loading your organizations…');
       return;
     }
@@ -70,18 +67,9 @@
             ${o.error ? `<div class="error">${o.error}<button class="btn btn-small" data-retry="${o.id}">Retry</button></div>` : ''}
             <div class="org-total">${fmt$(o.total)}</div>
             <div class="org-stats">
-              <div class="stat-item">
-                <div class="stat-value">${fmtN(o.donors||0)}</div>
-                <div class="stat-label">Donors</div>
-              </div>
-              <div class="stat-item">
-                <div class="stat-value">${fmt$(o.donors>0 ? (o.total/o.donors) : 0)}</div>
-                <div class="stat-label">Avg Gift</div>
-              </div>
-              <div class="stat-item">
-                <div class="stat-value">${o.goal>0 ? Math.round((o.total/o.goal)*100) : 0}%</div>
-                <div class="stat-label">Goal Progress</div>
-              </div>
+              <div class="stat-item"><div class="stat-value">${fmtN(o.donors||0)}</div><div class="stat-label">Donors</div></div>
+              <div class="stat-item"><div class="stat-value">${fmt$(o.donors? (o.total/o.donors) : 0)}</div><div class="stat-label">Avg Gift</div></div>
+              <div class="stat-item"><div class="stat-value">${o.goal? Math.round((o.total/o.goal)*100) : 0}%</div><div class="stat-label">Goal Progress</div></div>
             </div>
             <div class="org-actions">
               <div class="last-updated">${o.lastUpdated ? 'Updated: ' + new Date(o.lastUpdated).toLocaleTimeString() : 'Not yet updated'}</div>
@@ -94,7 +82,6 @@
         `).join('')}
       </div>
     `;
-    // Wire buttons
     els.orgsContainer.querySelectorAll('[data-refresh]').forEach(btn => {
       btn.addEventListener('click', async () => {
         const id = btn.getAttribute('data-refresh');
@@ -128,7 +115,7 @@
 
   async function refreshAll() {
     try {
-      els.refreshNowBtn && (els.refreshNowBtn.disabled = true, els.refreshNowBtn.textContent = 'Refreshing…');
+      if (els.refreshNowBtn) { els.refreshNowBtn.disabled = true; els.refreshNowBtn.textContent = 'Refreshing…'; }
       const res = await api('/api/organizations/refresh', { method: 'PUT' });
       orgs = res.data || orgs; updateSummary(); render();
       els.lastUpdate.textContent = 'Updated: ' + new Date().toLocaleTimeString();
@@ -136,7 +123,7 @@
     } catch (e) {
       toast(`Bulk refresh failed: ${e.message}`, false);
     } finally {
-      els.refreshNowBtn && (els.refreshNowBtn.disabled = false, els.refreshNowBtn.textContent = 'Refresh Now');
+      if (els.refreshNowBtn) { els.refreshNowBtn.disabled = false; els.refreshNowBtn.textContent = 'Refresh Now'; }
     }
   }
 
@@ -185,7 +172,6 @@
     els.refreshNowBtn && els.refreshNowBtn.addEventListener('click', refreshAll);
     els.exportBtn && els.exportBtn.addEventListener('click', exportData);
     load();
-    // background refresh every 10 min when not actively monitoring
     setInterval(() => { if (!isMonitoring) refreshAll(); }, 600000);
   });
 })();

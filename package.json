@@ -2,9 +2,8 @@
   "name": "ntgd-monitor",
   "version": "1.0.0",
   "description": "North Texas Giving Day real-time fundraising monitor",
-  "main": "server/app.js",
   "scripts": {
-    "dev": "nodemon server/local.js",
+    "dev": "node server/local.js",
     "start": "node server/local.js",
     "build": "echo 'No build step required'",
     "test": "jest --passWithNoTests",

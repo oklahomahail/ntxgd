@@ -5,12 +5,17 @@
   },
   "routes": [
     { "src": "^/api/(.*)$", "dest": "/api/index.js" },
+
+    
+    { "src": "^/app\\.js$", "dest": "/public/app.js" },
+    { "src": "^/data/(.*)$", "dest": "/public/data/$1" },
+
     { "handle": "filesystem" },
     { "src": "/(.*)", "dest": "/public/index.html" }
   ],
   "headers": [
-    { "source": "/(index.html)?", "headers": [{ "key": "Cache-Control", "value": "no-store" }] },
-    { "source": "/app.js", "headers": [{ "key": "Cache-Control", "value": "no-store" }] },
-    { "source": "/data/(.*)", "headers": [{ "key": "Cache-Control", "value": "no-store" }] }
+    { "source": "/(index.html)?", "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }] },
+    { "source": "/app.js",           "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }] },
+    { "source": "/data/(.*)",        "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }] }
   ]
 }

@@ -1,352 +1,304 @@
-/* NTXGD Monitor — inline "Last year" footer (no flip) */
-(() => {
-  // ---- Element refs ----
-  const els = {
-    totalRaised: document.getElementById('totalRaised'),
-    totalDonors: document.getElementById('totalDonors'),
-    avgGift: document.getElementById('avgGift'),
-    orgCount: document.getElementById('orgCount'),
-    orgs: document.getElementById('organizationsContainer'),
-    startBtn: document.getElementById('startBtn'),
-    stopBtn: document.getElementById('stopBtn'),
-    refreshNowBtn: document.getElementById('refreshNowBtn'),
-    exportBtn: document.getElementById('exportBtn'),
-    statusIndicator: document.getElementById('statusIndicator'),
-    statusText: document.getElementById('statusText'),
-    lastUpdate: document.getElementById('lastUpdate'),
-    refreshInterval: document.getElementById('refreshInterval'),
-    headerDescription: document.getElementById('headerDescription')
+// server/app.js
+'use strict';
+
+const path = require('path');
+const express = require('express');
+const app = express();
+
+// --- security & middleware (safe if not installed) ---
+let helmet, cors, rateLimit, axios, cheerio;
+try { helmet = require('helmet'); } catch {}
+try { cors = require('cors'); } catch {}
+try { rateLimit = require('express-rate-limit'); } catch {}
+try { axios = require('axios'); } catch {}
+try { cheerio = require('cheerio'); } catch {}
+
+// Behind Vercel’s proxy; required for correct client IP & rate-limit lib
+app.set('trust proxy', 1);
+
+// Optional hardening
+if (helmet) app.use(helmet());
+if (cors) app.use(cors());
+app.use(express.json());
+
+// --- config ---------------------------------------------------
+const config = {
+  nodeEnv: process.env.NODE_ENV || 'development',
+  batchDelayMs: parseInt(process.env.BATCH_DELAY_MS || '600', 10),
+  requestTimeoutMs: parseInt(process.env.REQUEST_TIMEOUT_MS || '12000', 10),
+  maxRetries: parseInt(process.env.MAX_RETRIES || '2', 10),
+  userAgent: process.env.USER_AGENT || 'NTXGD-Monitor/2.0 (+vercel)',
+  rateLimitWindowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000', 10),
+  rateLimitMaxRequests: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '200', 10),
+
+  organizations: [
+    { name: "Brother Bill's Helping Hand", url: "https://www.northtexasgivingday.org/organization/bbhh" },
+    { name: "Casa del Lago", url: "https://www.northtexasgivingday.org/organization/casa-del-lago" },
+    { name: "Dallas LIFE", url: "https://www.northtexasgivingday.org/organization/dallas-life-homeless-shelter" },
+    { name: "The Kessler School", url: "https://www.northtexasgivingday.org/organization/the-kessler-school" },
+    { name: "CityBridge Health Foundation", url: "https://www.northtexasgivingday.org/organization/Citybridge-Health-Foundation" },
+    { name: "Dallas Area Rape Crisis Center (DARCC)", url: "https://www.northtexasgivingday.org/organization/darcc" },
+    { name: "International Student Foundation (ISF)", url: "https://www.northtexasgivingday.org/organization/ISF" },
+    { name: "Girlstart", url: "https://www.northtexasgivingday.org/organization/Girlstart" }
+  ]
+};
+
+// --- logging helpers -----------------------------------------
+const log = {
+  info: (...a) => console.log('[INFO]', ...a),
+  warn: (...a) => console.warn('[WARN]', ...a),
+  error: (...a) => console.error('[ERROR]', ...a),
+};
+
+// simple req log
+app.use((req, res, next) => {
+  const t0 = Date.now();
+  res.on('finish', () => log.info(`${req.method} ${req.originalUrl} - ${res.statusCode} (${Date.now()-t0}ms)`));
+  next();
+});
+
+// --- static (serves /, /app.js, /data/ntxgd_last_year.json, etc.) ----
+app.use(express.static(path.join(__dirname, '..', 'public'), {
+  etag: true,
+  lastModified: true,
+  maxAge: 0,
+}));
+
+// --- optional API rate limiting ---------------------------------------
+if (rateLimit) {
+  app.use('/api', rateLimit({
+    windowMs: config.rateLimitWindowMs,
+    max: config.rateLimitMaxRequests,
+    standardHeaders: true,
+    legacyHeaders: false,
+    // allow health/ping freely
+    skip: (req) => req.path === '/api/health' || req.path === '/api/ping',
+    message: { error: 'Too many requests, slow down a bit.' }
+  }));
+}
+
+// --- helpers ---------------------------------------------------
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const urlToId = (raw) => {
+  const m = String(raw).match(/\/organization\/([^/?#]+)/i);
+  return m ? m[1].toLowerCase() : '';
+};
+
+// HTTP get with retry
+async function getWithRetry(url, tries = Math.max(1, config.maxRetries)) {
+  if (!axios) throw new Error('axios not available on server');
+  let lastErr;
+  for (let i = 0; i < tries; i++) {
+    try {
+      return await axios.get(url, {
+        timeout: config.requestTimeoutMs,
+        headers: {
+          'User-Agent': config.userAgent,
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+        },
+        validateStatus: s => s >= 200 && s < 400
+      });
+    } catch (e) {
+      lastErr = e;
+      if (i < tries - 1) await sleep(Math.min(1000 * 2 ** i, 5000));
+    }
+  }
+  throw lastErr;
+}
+
+// crude scraper
+function extractFundraisingData(html) {
+  if (!cheerio) {
+    return { total: 0, donors: 0, goal: 0, lastUpdated: new Date().toISOString(), error: 'scraper unavailable' };
+  }
+  const $ = cheerio.load(html);
+  const toNum = (s) => {
+    if (!s) return 0;
+    const n = parseFloat(String(s).replace(/[^0-9.]/g, ''));
+    return Number.isFinite(n) ? n : 0;
   };
 
-  // ---- State ----
-  let orgs = {};            // { id -> {id,name,url,total,donors,goal,lastUpdated,error} }
-  let prevOrgs = {};
-  let isRefreshing = false;
-  let isMonitoring = false;
-  let timer = null;
-  let lastYearStats = null; // array from /data/ntxgd_last_year.json
+  let total = 0, donors = 0, goal = 0;
 
-  // ---- Formatters ----
-  const $fmt = n => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(n || 0);
-  const nfmt = n => new Intl.NumberFormat('en-US').format(n || 0);
-
-  // ---- Toast ----
-  let toastTimer;
-  function toast(msg, ok = true) {
-    clearTimeout(toastTimer);
-    document.querySelectorAll('.toast').forEach(t => t.remove());
-    const t = document.createElement('div');
-    t.className = 'toast ' + (ok ? 'success' : 'error');
-    t.textContent = msg;
-    document.body.appendChild(t);
-    requestAnimationFrame(() => t.classList.add('show'));
-    toastTimer = setTimeout(() => {
-      t.classList.remove('show');
-      setTimeout(() => t.remove(), 300);
-    }, 2500);
-  }
-
-  // ---- HTTP helper with timeout ----
-  async function api(path, opts = {}) {
-    const ctrl = new AbortController();
-    const to = setTimeout(() => ctrl.abort(), 30000);
+  // JSON-LD pass
+  $('script[type="application/ld+json"]').each((_, el) => {
     try {
-      const res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, signal: ctrl.signal, ...opts });
-      clearTimeout(to);
-      if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(()=>'Error')}`);
-      return res.json();
-    } catch (e) {
-      clearTimeout(to);
-      if (e.name === 'AbortError') throw new Error('Request timed out');
-      throw e;
-    }
-  }
-
-  // ---- Last year data ----
-  async function loadLastYear() {
-    try {
-      const v = 'ly-3'; // <- bump when JSON changes to bust CDN/browser cache
-      const r = await fetch(`/data/ntxgd_last_year.json?v=${v}`, { cache: 'no-store' });
-      lastYearStats = await r.json();
-    } catch {
-      lastYearStats = null;
-      console.log('Last year data not available');
-    }
-  }
-  const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-  function matchLastYear(org) {
-    if (!lastYearStats) return null;
-    const byId = lastYearStats.find(d => (d.orgId || '').toLowerCase() === (org.id || '').toLowerCase());
-    if (byId) return byId;
-    const key = norm(org.name);
-    return lastYearStats.find(d => norm(d.orgName) === key) || null;
-  }
-  function lyFooterHTML(ly) {
-    if (!ly) return '';
-    const donors = ly.totals?.donors || 0;
-    const dollars = ly.totals?.dollars || 0;
-    const gifts = ly.totals?.gifts || 0;
-    const bars = (ly.dayOf || []).map(b => {
-      const pct = Number(b.percent) || 0;
-      const h = Math.max(6, Math.min(64, Math.round(pct * 0.64))); // 0–100% => 0–64px
-      return `<div title="${b.label}: ${pct}%"
-                 style="display:inline-block;width:10px;height:${h}px;margin:0 3px;vertical-align:bottom;background:#d5d5d5;border-radius:2px;"></div>`;
-    }).join('');
-    return `
-      <div class="ly-footer" style="margin-top:20px;border-top:1px solid #e8e8e8;padding-top:14px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;">
-          <div style="font-size:12px;color:#7f8c8d;">
-            <strong>Last year:</strong> ${nfmt(donors)} donors • $${nfmt(dollars)} • ${nfmt(gifts)} gifts
-          </div>
-          <div aria-label="Last year time-of-day breakdown" style="height:64px;display:flex;align-items:flex-end;">
-            ${bars}
-          </div>
-        </div>
-      </div>`;
-  }
-
-  // ---- Freshness / change detection ----
-  function getFreshness(org) {
-    if (!org.lastUpdated) return null;
-    const secs = (Date.now() - new Date(org.lastUpdated).getTime()) / 1000;
-    if (secs < 300) return 'fresh';
-    if (secs < 900) return 'stale';
-    return 'very-stale';
-  }
-  function wasUpdated(id) {
-    const a = orgs[id], b = prevOrgs[id];
-    if (!a || !b) return false;
-    return a.total !== b.total || a.donors !== b.donors || a.goal !== b.goal;
-  }
-
-  // ---- Summary ----
-  let lastSummary = {};
-  function updateSummary() {
-    const arr = Object.values(orgs);
-    const totalRaised = arr.reduce((s, o) => s + (o.total || 0), 0);
-    const totalDonors = arr.reduce((s, o) => s + (o.donors || 0), 0);
-    const avgGift = totalDonors ? totalRaised / totalDonors : 0;
-    const orgCount = arr.length;
-    const next = { totalRaised, totalDonors, avgGift, orgCount };
-    if (JSON.stringify(next) !== JSON.stringify(lastSummary)) {
-      els.totalRaised.textContent = $fmt(totalRaised);
-      els.totalDonors.textContent = nfmt(totalDonors);
-      els.avgGift.textContent = $fmt(avgGift);
-      els.orgCount.textContent = nfmt(orgCount);
-      lastSummary = next;
-    }
-  }
-
-  // ---- Render ----
-  function render() {
-    const list = Object.values(orgs).sort((a, b) => (b.total || 0) - (a.total || 0));
-    els.orgs.innerHTML = '';
-    const grid = document.createElement('div');
-    grid.className = 'org-grid';
-    els.orgs.appendChild(grid);
-
-    if (!list.length) {
-      grid.innerHTML = `
-        <div class="gentle-start" style="grid-column:1/-1; background:#f8f9fa; border:2px dashed #bdc3c7; padding:40px; text-align:center; border-radius:8px; margin:20px 0;">
-          <h3 style="color:#7f8c8d; margin-bottom:16px; font-weight:400;">Ready to track your organizations</h3>
-          <p style="color:#95a5a6; margin-bottom:24px;">Click "Start Auto-Refresh" to begin, or "Refresh Now" for a one-time update.</p>
-          <div style="display:flex;gap:12px;justify-content:center;">
-            <button class="btn btn-success" id="__start">Start Auto-Refresh</button>
-            <button class="btn btn-primary" id="__now">Refresh Now</button>
-          </div>
-        </div>`;
-      grid.querySelector('#__start')?.addEventListener('click', () => els.startBtn?.click());
-      grid.querySelector('#__now')?.addEventListener('click', () => els.refreshNowBtn?.click());
-      if (els.headerDescription) els.headerDescription.textContent = 'Ready to track your organizations';
-      return;
-    }
-
-    if (els.headerDescription) els.headerDescription.textContent = `Tracking ${list.length} organizations`;
-
-    for (const org of list) {
-      const card = document.createElement('div');
-      const classes = ['org-card'];
-      if (org.error) classes.push('has-error');
-      if (wasUpdated(org.id)) classes.push('recently-updated');
-      card.className = classes.join(' ');
-      card.setAttribute('data-org-id', org.id);
-
-      const avg = org.donors ? org.total / org.donors : 0;
-      const pct = org.goal ? Math.round((org.total / org.goal) * 100) : 0;
-      const pctCapped = Math.min(pct, 100);
-      const fresh = getFreshness(org);
-      const dot = fresh ? `<span class="freshness-indicator ${fresh}"></span>` : '';
-
-      const ly = matchLastYear(org);
-
-      card.innerHTML = `
-        <div class="org-name">${org.name}${dot}</div>
-        ${org.error ? `<div class="error">${org.error} <button class="btn btn-small" data-retry="${org.id}">Retry</button></div>` : ''}
-        <div class="org-total">${$fmt(org.total)}</div>
-        <div class="org-stats">
-          <div class="stat-item">
-            <div class="stat-value">${nfmt(org.donors || 0)}</div>
-            <div class="stat-label">Donors</div>
-          </div>
-          <div class="stat-item">
-            <div class="stat-value">${$fmt(avg)}</div>
-            <div class="stat-label">Avg Gift</div>
-          </div>
-          <div class="stat-item goal-progress">
-            <div class="stat-label">Goal Progress</div>
-            <div class="progress-container">
-              <div class="progress-bar" style="width:${pctCapped}%"></div>
-              <div class="progress-text">${pct}%</div>
-            </div>
-          </div>
-        </div>
-
-        ${ly ? lyFooterHTML(ly) : ''}
-
-        <div class="org-actions">
-          <div class="last-updated">${org.lastUpdated ? 'Updated: ' + new Date(org.lastUpdated).toLocaleTimeString() : 'Not yet updated'}</div>
-          <div style="display:flex;gap:8px;">
-            <button class="btn btn-primary btn-small" data-refresh="${org.id}">Refresh</button>
-            <a class="btn btn-primary btn-small" target="_blank" rel="noopener noreferrer" href="${org.url}">View Page</a>
-          </div>
-        </div>
-      `;
-      grid.appendChild(card);
-    }
-  }
-
-  // ---- Data ops ----
-  async function loadAll() {
-    try {
-      const data = await api('/api/organizations');
-      orgs = data || {};
-      updateSummary();
-      render();
-    } catch (e) {
-      toast(`Failed to load: ${e.message}`, false);
-    }
-  }
-
-  async function refreshOne(id, btn) {
-    if (isRefreshing) return;
-    try {
-      btn.disabled = true;
-      btn.textContent = 'Refreshing…';
-      if (orgs[id]) prevOrgs[id] = { ...orgs[id] };
-      const data = await api(`/api/organizations/${id}/refresh`, { method: 'PUT' });
-      orgs[id] = data;
-      updateSummary();
-      render();
-      toast(`${data.name} refreshed`);
-    } catch (e) {
-      toast(`Refresh failed: ${e.message}`, false);
-    } finally {
-      btn.disabled = false;
-      btn.textContent = 'Refresh';
-    }
-  }
-
-  async function refreshAll() {
-    if (isRefreshing) return;
-    isRefreshing = true;
-    try {
-      if (els.refreshNowBtn) { els.refreshNowBtn.disabled = true; els.refreshNowBtn.textContent = 'Refreshing…'; }
-      prevOrgs = JSON.parse(JSON.stringify(orgs));
-      const res = await api('/api/organizations/refresh', { method: 'PUT' });
-      orgs = res.data || orgs;
-      els.lastUpdate.textContent = 'Updated: ' + new Date().toLocaleTimeString();
-      updateSummary();
-      render();
-      if (res.summary) {
-        const { success, total, errors } = res.summary;
-        toast(`Refreshed ${success}/${total}${errors ? ` (${errors} errors)` : ''}`);
-      } else {
-        toast('All organizations refreshed');
-      }
-    } catch (e) {
-      toast(`Bulk refresh failed: ${e.message}`, false);
-    } finally {
-      isRefreshing = false;
-      if (els.refreshNowBtn) {
-        els.refreshNowBtn.disabled = false;
-        els.refreshNowBtn.textContent = 'Refresh Now';
-      }
-    }
-  }
-
-  // ---- Controls ----
-  function start() {
-    const secs = Math.max(30, parseInt(els.refreshInterval.value) || 90);
-    els.refreshInterval.value = secs;
-    if (timer) clearInterval(timer);
-    timer = setInterval(refreshAll, secs * 1000);
-    isMonitoring = true;
-    els.startBtn.style.display = 'none';
-    els.stopBtn.style.display = 'inline-block';
-    els.statusIndicator.classList.add('active');
-    els.statusText.textContent = `Auto-refreshing every ${secs}s`;
-    refreshAll();
-    toast(`Auto-refresh started (${secs}s)`);
-  }
-  function stop() {
-    isMonitoring = false;
-    if (timer) clearInterval(timer);
-    timer = null;
-    els.startBtn.style.display = 'inline-block';
-    els.stopBtn.style.display = 'none';
-    els.statusIndicator.classList.remove('active');
-    els.statusText.textContent = 'Auto-refresh stopped';
-    toast('Auto-refresh stopped');
-  }
-
-  function exportCSV() {
-    try {
-      const rows = [['Organization','Total Raised','Donors','Avg Gift','Goal','Goal %','Last Updated','Status','URL']];
-      for (const o of Object.values(orgs)) {
-        const avg = o.donors ? Math.round((o.total / o.donors) * 100) / 100 : 0;
-        const pct = o.goal ? Math.round((o.total / o.goal) * 100) : 0;
-        const last = o.lastUpdated ? new Date(o.lastUpdated).toLocaleString() : 'Never';
-        rows.push([o.name, o.total||0, o.donors||0, avg, o.goal||0, pct, last, o.error ? 'Error' : 'OK', o.url]);
-      }
-      const csv = rows.map(r => r.map(c => `"${String(c).replace(/"/g,'""')}"`).join(',')).join('\n');
-      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = `ntgd-${new Date().toISOString().replace(/[:T]/g,'-').slice(0,16)}.csv`;
-      document.body.appendChild(a); a.click(); a.remove();
-      toast('Data exported');
-    } catch (e) { toast(`Export failed: ${e.message}`, false); }
-  }
-
-  // ---- Events ----
-  function handleClicks(e) {
-    const r = e.target.closest('[data-refresh]');
-    const retry = e.target.closest('[data-retry]');
-    if (r) refreshOne(r.getAttribute('data-refresh'), r);
-    if (retry) {
-      const id = retry.getAttribute('data-retry');
-      const btn = els.orgs.querySelector(`[data-refresh="${id}"]`);
-      if (btn) refreshOne(id, btn);
-    }
-  }
-
-  // ---- Init ----
-  document.addEventListener('DOMContentLoaded', async () => {
-    els.orgs?.addEventListener('click', handleClicks);
-    els.startBtn?.addEventListener('click', start);
-    els.stopBtn?.addEventListener('click', stop);
-    els.refreshNowBtn?.addEventListener('click', refreshAll);
-    els.exportBtn?.addEventListener('click', exportCSV);
-    document.addEventListener('keydown', (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'r') {
-        e.preventDefault(); refreshAll(); toast('Refreshed via keyboard');
-      }
-    });
-
-    await loadLastYear();
-    await loadAll();
-
-    // Background top-up every 10 mins when idle
-    setInterval(() => { if (!isMonitoring) refreshAll(); }, 600000);
+      const data = JSON.parse($(el).text());
+      if (!total && (data.amount || data.totalRaised)) total = toNum(data.amount || data.totalRaised);
+      if (!donors && (data.donorCount || data.supporters)) donors = toNum(data.donorCount || data.supporters);
+      if (!goal && (data.goal || data.target)) goal = toNum(data.goal || data.target);
+    } catch {}
   });
-})();
+
+  const bodyText = $('body').text().replace(/\s+/g, ' ');
+
+  if (!total) {
+    const m = bodyText.match(/\$?\s*([\d,]+(?:\.\d{2})?)\s*(?:raised|total\s*raised|amount\s*raised)/i);
+    if (m) total = toNum(m[1]);
+  }
+  if (!donors) {
+    const m = bodyText.match(/([\d,]+)\s*(?:donors?|supporters?)/i);
+    if (m) donors = toNum(m[1]);
+  }
+  if (!goal) {
+    const m = bodyText.match(/goal[:\s]*\$?\s*([\d,]+(?:\.\d{2})?)/i);
+    if (m) goal = toNum(m[1]);
+  }
+
+  return {
+    total: total || 0,
+    donors: donors || 0,
+    goal: goal || 0,
+    lastUpdated: new Date().toISOString(),
+    error: null
+  };
+}
+
+// sanity merge (avoid wild spikes)
+function saneMerge(prev, next, orgName) {
+  let safeTotal = next.total;
+  if (!Number.isFinite(safeTotal) || safeTotal <= 0) safeTotal = prev.total;
+  if (prev.total > 0 && safeTotal > prev.total * 5) {
+    log.warn(`Rejecting suspicious jump for ${orgName}: ${prev.total} -> ${safeTotal}`);
+    safeTotal = prev.total;
+  }
+  return {
+    total: safeTotal,
+    donors: Number.isFinite(next.donors) && next.donors >= 0 ? next.donors : prev.donors,
+    goal: Number.isFinite(next.goal) && next.goal >= 0 ? next.goal : prev.goal,
+    lastUpdated: next.lastUpdated,
+    error: next.error || null
+  };
+}
+
+// --- in-memory data -------------------------------------------
+let organizationsData = {};
+for (const { name, url } of config.organizations) {
+  const id = urlToId(url);
+  if (id) organizationsData[id] = { id, name, url, total: 0, donors: 0, goal: 0, lastUpdated: null, error: null };
+}
+log.info(`Initialized ${Object.keys(organizationsData).length} organizations`);
+
+// --- API -------------------------------------------------------
+app.get('/api/health', (req, res) => {
+  const orgs = Object.values(organizationsData);
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    organizations: orgs.length,
+    dependencies: { axios: !!axios, cheerio: !!cheerio }
+  });
+});
+
+app.get('/api/ping', (req, res) => res.json({ ok: true, ts: Date.now() }));
+
+app.get('/api/_debug', (req, res) => {
+  res.json({ keys: Object.keys(organizationsData), axios: !!axios, cheerio: !!cheerio });
+});
+
+app.get('/api/organizations', (req, res) => res.json(organizationsData));
+
+app.put('/api/organizations/:id/refresh', async (req, res) => {
+  const id = String(req.params.id || '').toLowerCase();
+  const org = organizationsData[id];
+  if (!org) return res.status(404).json({ error: 'Organization not found' });
+
+  if (!axios || !cheerio) {
+    const updated = { ...org, error: 'scraper unavailable', lastUpdated: new Date().toISOString() };
+    organizationsData[id] = updated;
+    return res.status(503).json(updated);
+  }
+
+  try {
+    const resp = await getWithRetry(org.url, config.maxRetries);
+    const scraped = extractFundraisingData(resp.data);
+    const merged = { ...org, ...saneMerge(org, scraped, org.name) };
+    organizationsData[id] = merged;
+    res.json(merged);
+  } catch (e) {
+    const updated = { ...org, error: e.message || 'refresh failed', lastUpdated: new Date().toISOString() };
+    organizationsData[id] = updated;
+    res.status(502).json(updated);
+  }
+});
+
+app.put('/api/organizations/refresh', async (req, res) => {
+  const ids = Object.keys(organizationsData);
+  const results = {};
+  let success = 0, errors = 0;
+
+  for (let i = 0; i < ids.length; i++) {
+    const id = ids[i];
+    const org = organizationsData[id];
+
+    if (!axios || !cheerio) {
+      organizationsData[id] = { ...org, error: 'scraper unavailable', lastUpdated: new Date().toISOString() };
+      results[id] = 'skipped';
+      continue;
+    }
+
+    try {
+      const resp = await getWithRetry(org.url, config.maxRetries);
+      const scraped = extractFundraisingData(resp.data);
+      organizationsData[id] = { ...org, ...saneMerge(org, scraped, org.name) };
+      results[id] = 'success';
+      success++;
+    } catch (e) {
+      organizationsData[id] = { ...org, error: e.message || 'refresh failed', lastUpdated: new Date().toISOString() };
+      results[id] = 'error';
+      errors++;
+    }
+
+    if (i < ids.length - 1) await sleep(config.batchDelayMs);
+  }
+
+  res.json({
+    message: 'Bulk refresh completed',
+    results,
+    data: organizationsData,
+    summary: { total: ids.length, success, errors }
+  });
+});
+
+app.get('/api/summary', (req, res) => {
+  const orgs = Object.values(organizationsData);
+  const totalRaised = orgs.reduce((s, o) => s + (o.total || 0), 0);
+  const totalDonors = orgs.reduce((s, o) => s + (o.donors || 0), 0);
+  const totalGoal   = orgs.reduce((s, o) => s + (o.goal   || 0), 0);
+  res.json({
+    organizationCount: orgs.length,
+    totalRaised,
+    totalDonors,
+    totalGoal,
+    averageGift: totalDonors > 0 ? Math.round((totalRaised / totalDonors) * 100) / 100 : 0,
+    lastUpdated: new Date().toISOString()
+  });
+});
+
+app.get('/api/export.csv', (req, res) => {
+  const orgs = Object.values(organizationsData);
+  const rows = [['Organization','Total Raised','Donors','Avg Gift','Goal','Goal %','Last Updated','Status']];
+  for (const o of orgs) {
+    const avgGift = o.donors ? (o.total / o.donors).toFixed(2) : '0.00';
+    const goalPct = o.goal ? Math.round((o.total / o.goal) * 100) : 0;
+    rows.push([
+      `"${o.name}"`, o.total||0, o.donors||0, avgGift, o.goal||0, goalPct,
+      `"${o.lastUpdated ? new Date(o.lastUpdated).toLocaleString() : 'Never'}"`,
+      `"${o.error ? 'Error' : 'OK'}"`
+    ].join(','));
+  }
+  const csv = rows.join('\n');
+  const ts = new Date().toISOString().replace(/[:T]/g,'-').slice(0,16);
+  res.setHeader('Content-Type','text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="ntgd-export-${ts}.csv"`);
+  res.send(csv);
+});
+
+// --- SPA fallback (non-API routes -> index.html) ---------------
+app.get('*', (req, res, next) => {
+  if (req.path.startsWith('/api/')) return next();
+  res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
+});
+
+// --- export for Vercel/Node entrypoints -----------------------
+module.exports = app;

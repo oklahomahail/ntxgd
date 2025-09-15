@@ -1,670 +1,352 @@
-// server/app.js - Enhanced NTXGD Monitor with all improvements + data sanity protection
-'use strict';
-
-const express = require('express');
-const path = require('path');
-
-// Safe/optional imports (won't crash if missing in some environments)
-let cors;      try { cors = require('cors'); } catch { cors = () => (req,res,next)=>next(); }
-let helmet;    try { helmet = require('helmet'); } catch { helmet = () => (req,res,next)=>next(); }
-let rateLimit; try { rateLimit = require('express-rate-limit'); } catch { rateLimit = null; }
-let axios;     try { axios = require('axios'); } catch { axios = null; }
-let cheerio;   try { cheerio = require('cheerio'); } catch { cheerio = null; }
-
-// --------------------------- Configuration ---------------------------
-const config = {
-  // Server
-  port: parseInt(process.env.PORT) || 3001,
-  host: process.env.HOST || '0.0.0.0',
-  nodeEnv: process.env.NODE_ENV || 'development',
-  
-  // Security
-  allowedOrigins: (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean),
-  
-  // Scraping
-  batchDelayMs: parseInt(process.env.BATCH_DELAY_MS) || 600,
-  requestTimeoutMs: parseInt(process.env.REQUEST_TIMEOUT_MS) || 12000,
-  maxRetries: parseInt(process.env.MAX_RETRIES) || 2,
-  userAgent: process.env.USER_AGENT || 'NTXGD-Monitor/2.0 (+vercel)',
-  
-  // Rate limiting
-  rateLimitWindowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 60000,
-  rateLimitMaxRequests: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 200,
-  
-  // Monitoring
-  logLevel: process.env.LOG_LEVEL || 'info',
-  
-  // Organizations
-  organizations: [
-    { name: "Brother Bill's Helping Hand", url: "https://www.northtexasgivingday.org/organization/bbhh" },
-    { name: "Casa del Lago", url: "https://www.northtexasgivingday.org/organization/casa-del-lago" },
-    { name: "Dallas LIFE", url: "https://www.northtexasgivingday.org/organization/dallas-life-homeless-shelter" },
-    { name: "The Kessler School", url: "https://www.northtexasgivingday.org/organization/the-kessler-school" },
-    { name: "CityBridge Health Foundation", url: "https://www.northtexasgivingday.org/organization/Citybridge-Health-Foundation" },
-    { name: "Dallas Area Rape Crisis Center (DARCC)", url: "https://www.northtexasgivingday.org/organization/darcc" },
-    { name: "International Student Foundation (ISF)", url: "https://www.northtexasgivingday.org/organization/ISF" },
-    { name: "Girlstart", url: "https://www.northtexasgivingday.org/organization/Girlstart" }
-  ]
-};
-
-// Logging utility
-const logger = {
-  debug: (...args) => config.logLevel === 'debug' && console.log('[DEBUG]', ...args),
-  info: (...args) => ['debug', 'info'].includes(config.logLevel) && console.log('[INFO]', ...args),
-  warn: (...args) => console.warn('[WARN]', ...args),
-  error: (...args) => console.error('[ERROR]', ...args)
-};
-
-// --------------------------- Utils ---------------------------
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-// Extract /organization/<slug>
-function urlToId(raw) {
-  const m = String(raw).match(/\/organization\/([^/?#]+)/i);
-  return m ? m[1].toLowerCase() : '';
-}
-
-// Enhanced HTTP client with retries
-async function getWithRetry(url, tries = 3) {
-  if (!axios) throw new Error('axios not available');
-  
-  let lastErr;
-  for (let i = 0; i < tries; i++) {
-    try {
-      const response = await axios.get(url, { 
-        headers: { 
-          'User-Agent': config.userAgent,
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Accept-Language': 'en-US,en;q=0.5',
-          'Accept-Encoding': 'gzip, deflate',
-          'DNT': '1',
-          'Connection': 'keep-alive',
-          'Upgrade-Insecure-Requests': '1'
-        }, 
-        timeout: config.requestTimeoutMs,
-        maxRedirects: 5,
-        validateStatus: status => status >= 200 && status < 400
-      });
-      
-      return response;
-      
-    } catch (e) {
-      lastErr = e;
-      const status = e.response?.status;
-      
-      // Don't retry on client errors (4xx) except 429
-      if (status >= 400 && status < 500 && status !== 429) {
-        break;
-      }
-      
-      // Exponential backoff for retries
-      if (i < tries - 1) {
-        const delay = Math.min(1000 * Math.pow(2, i), 5000);
-        logger.debug(`Retry attempt ${i + 1} failed for ${url}, retrying in ${delay}ms`);
-        await sleep(delay);
-      }
-    }
-  }
-  
-  throw lastErr;
-}
-
-// Enhanced data extraction
-function extractFundraisingData(html) {
-  if (!cheerio) return { total: 0, donors: 0, goal: 0, lastUpdated: new Date().toISOString(), error: 'cheerio not available' };
-  
-  const $ = cheerio.load(html);
-  
-  // Try structured data first (JSON-LD, microdata)
-  let structuredData = {};
-  $('script[type="application/ld+json"]').each((i, el) => {
-    try {
-      const data = JSON.parse($(el).html());
-      if (data.amount || data.totalRaised || data.donationAmount) {
-        structuredData = data;
-      }
-    } catch (e) {
-      // Ignore malformed JSON
-    }
-  });
-
-  const toNum = (s) => {
-    if (!s) return 0;
-    const cleaned = String(s).replace(/[^0-9.]/g, '');
-    const n = parseFloat(cleaned);
-    return Number.isFinite(n) ? n : 0;
+/* NTXGD Monitor — inline "Last year" footer (no flip) */
+(() => {
+  // ---- Element refs ----
+  const els = {
+    totalRaised: document.getElementById('totalRaised'),
+    totalDonors: document.getElementById('totalDonors'),
+    avgGift: document.getElementById('avgGift'),
+    orgCount: document.getElementById('orgCount'),
+    orgs: document.getElementById('organizationsContainer'),
+    startBtn: document.getElementById('startBtn'),
+    stopBtn: document.getElementById('stopBtn'),
+    refreshNowBtn: document.getElementById('refreshNowBtn'),
+    exportBtn: document.getElementById('exportBtn'),
+    statusIndicator: document.getElementById('statusIndicator'),
+    statusText: document.getElementById('statusText'),
+    lastUpdate: document.getElementById('lastUpdate'),
+    refreshInterval: document.getElementById('refreshInterval'),
+    headerDescription: document.getElementById('headerDescription')
   };
 
-  let total = 0, donors = 0, goal = 0;
+  // ---- State ----
+  let orgs = {};            // { id -> {id,name,url,total,donors,goal,lastUpdated,error} }
+  let prevOrgs = {};
+  let isRefreshing = false;
+  let isMonitoring = false;
+  let timer = null;
+  let lastYearStats = null; // array from /data/ntxgd_last_year.json
 
-  // Try structured data first
-  if (structuredData.amount || structuredData.totalRaised) {
-    total = toNum(structuredData.amount || structuredData.totalRaised);
+  // ---- Formatters ----
+  const $fmt = n => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(n || 0);
+  const nfmt = n => new Intl.NumberFormat('en-US').format(n || 0);
+
+  // ---- Toast ----
+  let toastTimer;
+  function toast(msg, ok = true) {
+    clearTimeout(toastTimer);
+    document.querySelectorAll('.toast').forEach(t => t.remove());
+    const t = document.createElement('div');
+    t.className = 'toast ' + (ok ? 'success' : 'error');
+    t.textContent = msg;
+    document.body.appendChild(t);
+    requestAnimationFrame(() => t.classList.add('show'));
+    toastTimer = setTimeout(() => {
+      t.classList.remove('show');
+      setTimeout(() => t.remove(), 300);
+    }, 2500);
   }
-  if (structuredData.donorCount || structuredData.supporters) {
-    donors = toNum(structuredData.donorCount || structuredData.supporters);
-  }
-  if (structuredData.goal || structuredData.target) {
-    goal = toNum(structuredData.goal || structuredData.target);
-  }
 
-  // Fallback to text parsing if structured data not found
-  if (!total || !donors || !goal) {
-    const text = $('body').text().replace(/\s+/g, ' ').trim();
-    
-    // Enhanced patterns for total raised
-    if (!total) {
-      const patterns = [
-        /\$\s*([\d,]+(?:\.\d{2})?)\s*raised/i,
-        /raised\s*\$?\s*([\d,]+(?:\.\d{2})?)/i,
-        /total\s*raised[:\s]*\$?\s*([\d,]+(?:\.\d{2})?)/i,
-        /amount\s*raised[:\s]*\$?\s*([\d,]+(?:\.\d{2})?)/i
-      ];
-      
-      for (const pattern of patterns) {
-        const match = text.match(pattern);
-        if (match) {
-          total = toNum(match[1]);
-          break;
-        }
-      }
-    }
-
-    // Enhanced patterns for donors
-    if (!donors) {
-      const patterns = [
-        /by\s+([\d,]+)\s+donors?/i,
-        /([\d,]+)\s+donors?/i,
-        /([\d,]+)\s+supporters?/i,
-        /supporters?[:\s]*([\d,]+)/i
-      ];
-      
-      for (const pattern of patterns) {
-        const match = text.match(pattern);
-        if (match) {
-          donors = toNum(match[1]);
-          break;
-        }
-      }
-    }
-
-    // Enhanced patterns for goal
-    if (!goal) {
-      const patterns = [
-        /\$\s*([\d,]+(?:\.\d{2})?)\s*goal/i,
-        /goal[:\s]*\$?\s*([\d,]+(?:\.\d{2})?)/i,
-        /target[:\s]*\$?\s*([\d,]+(?:\.\d{2})?)/i
-      ];
-      
-      for (const pattern of patterns) {
-        const match = text.match(pattern);
-        if (match) {
-          goal = toNum(match[1]);
-          break;
-        }
-      }
-    }
-
-    // Try to derive missing values from percentage
-    const percentMatch = text.match(/(\d{1,3}(?:\.\d+)?)\s*%\s*(?:complete|of\s+goal|raised)/i);
-    if (percentMatch) {
-      const percent = parseFloat(percentMatch[1]);
-      if (percent > 0 && percent <= 100) {
-        if (!total && goal) total = Math.round((goal * percent) / 100);
-        if (!goal && total) goal = Math.round((total * 100) / percent);
-      }
+  // ---- HTTP helper with timeout ----
+  async function api(path, opts = {}) {
+    const ctrl = new AbortController();
+    const to = setTimeout(() => ctrl.abort(), 30000);
+    try {
+      const res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, signal: ctrl.signal, ...opts });
+      clearTimeout(to);
+      if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(()=>'Error')}`);
+      return res.json();
+    } catch (e) {
+      clearTimeout(to);
+      if (e.name === 'AbortError') throw new Error('Request timed out');
+      throw e;
     }
   }
 
-  // Look for specific selectors that might contain the data
-  const selectors = [
-    '[class*="raised"], [id*="raised"]',
-    '[class*="total"], [id*="total"]',
-    '[class*="amount"], [id*="amount"]',
-    '[class*="donors"], [id*="donors"]',
-    '[class*="supporters"], [id*="supporters"]',
-    '[class*="goal"], [id*="goal"]',
-    '[class*="target"], [id*="target"]'
-  ];
+  // ---- Last year data ----
+  async function loadLastYear() {
+    try {
+      const v = 'ly-3'; // <- bump when JSON changes to bust CDN/browser cache
+      const r = await fetch(`/data/ntxgd_last_year.json?v=${v}`, { cache: 'no-store' });
+      lastYearStats = await r.json();
+    } catch {
+      lastYearStats = null;
+      console.log('Last year data not available');
+    }
+  }
+  const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  function matchLastYear(org) {
+    if (!lastYearStats) return null;
+    const byId = lastYearStats.find(d => (d.orgId || '').toLowerCase() === (org.id || '').toLowerCase());
+    if (byId) return byId;
+    const key = norm(org.name);
+    return lastYearStats.find(d => norm(d.orgName) === key) || null;
+  }
+  function lyFooterHTML(ly) {
+    if (!ly) return '';
+    const donors = ly.totals?.donors || 0;
+    const dollars = ly.totals?.dollars || 0;
+    const gifts = ly.totals?.gifts || 0;
+    const bars = (ly.dayOf || []).map(b => {
+      const pct = Number(b.percent) || 0;
+      const h = Math.max(6, Math.min(64, Math.round(pct * 0.64))); // 0–100% => 0–64px
+      return `<div title="${b.label}: ${pct}%"
+                 style="display:inline-block;width:10px;height:${h}px;margin:0 3px;vertical-align:bottom;background:#d5d5d5;border-radius:2px;"></div>`;
+    }).join('');
+    return `
+      <div class="ly-footer" style="margin-top:20px;border-top:1px solid #e8e8e8;padding-top:14px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;">
+          <div style="font-size:12px;color:#7f8c8d;">
+            <strong>Last year:</strong> ${nfmt(donors)} donors • $${nfmt(dollars)} • ${nfmt(gifts)} gifts
+          </div>
+          <div aria-label="Last year time-of-day breakdown" style="height:64px;display:flex;align-items:flex-end;">
+            ${bars}
+          </div>
+        </div>
+      </div>`;
+  }
 
-  selectors.forEach(selector => {
-    $(selector).each((i, el) => {
-      const text = $(el).text().trim();
-      const dollarMatch = text.match(/\$\s*([\d,]+(?:\.\d{2})?)/);
-      const numberMatch = text.match(/\b([\d,]+)\b/);
-      
-      if (dollarMatch && !total && (text.toLowerCase().includes('raised') || text.toLowerCase().includes('total'))) {
-        total = toNum(dollarMatch[1]);
+  // ---- Freshness / change detection ----
+  function getFreshness(org) {
+    if (!org.lastUpdated) return null;
+    const secs = (Date.now() - new Date(org.lastUpdated).getTime()) / 1000;
+    if (secs < 300) return 'fresh';
+    if (secs < 900) return 'stale';
+    return 'very-stale';
+  }
+  function wasUpdated(id) {
+    const a = orgs[id], b = prevOrgs[id];
+    if (!a || !b) return false;
+    return a.total !== b.total || a.donors !== b.donors || a.goal !== b.goal;
+  }
+
+  // ---- Summary ----
+  let lastSummary = {};
+  function updateSummary() {
+    const arr = Object.values(orgs);
+    const totalRaised = arr.reduce((s, o) => s + (o.total || 0), 0);
+    const totalDonors = arr.reduce((s, o) => s + (o.donors || 0), 0);
+    const avgGift = totalDonors ? totalRaised / totalDonors : 0;
+    const orgCount = arr.length;
+    const next = { totalRaised, totalDonors, avgGift, orgCount };
+    if (JSON.stringify(next) !== JSON.stringify(lastSummary)) {
+      els.totalRaised.textContent = $fmt(totalRaised);
+      els.totalDonors.textContent = nfmt(totalDonors);
+      els.avgGift.textContent = $fmt(avgGift);
+      els.orgCount.textContent = nfmt(orgCount);
+      lastSummary = next;
+    }
+  }
+
+  // ---- Render ----
+  function render() {
+    const list = Object.values(orgs).sort((a, b) => (b.total || 0) - (a.total || 0));
+    els.orgs.innerHTML = '';
+    const grid = document.createElement('div');
+    grid.className = 'org-grid';
+    els.orgs.appendChild(grid);
+
+    if (!list.length) {
+      grid.innerHTML = `
+        <div class="gentle-start" style="grid-column:1/-1; background:#f8f9fa; border:2px dashed #bdc3c7; padding:40px; text-align:center; border-radius:8px; margin:20px 0;">
+          <h3 style="color:#7f8c8d; margin-bottom:16px; font-weight:400;">Ready to track your organizations</h3>
+          <p style="color:#95a5a6; margin-bottom:24px;">Click "Start Auto-Refresh" to begin, or "Refresh Now" for a one-time update.</p>
+          <div style="display:flex;gap:12px;justify-content:center;">
+            <button class="btn btn-success" id="__start">Start Auto-Refresh</button>
+            <button class="btn btn-primary" id="__now">Refresh Now</button>
+          </div>
+        </div>`;
+      grid.querySelector('#__start')?.addEventListener('click', () => els.startBtn?.click());
+      grid.querySelector('#__now')?.addEventListener('click', () => els.refreshNowBtn?.click());
+      if (els.headerDescription) els.headerDescription.textContent = 'Ready to track your organizations';
+      return;
+    }
+
+    if (els.headerDescription) els.headerDescription.textContent = `Tracking ${list.length} organizations`;
+
+    for (const org of list) {
+      const card = document.createElement('div');
+      const classes = ['org-card'];
+      if (org.error) classes.push('has-error');
+      if (wasUpdated(org.id)) classes.push('recently-updated');
+      card.className = classes.join(' ');
+      card.setAttribute('data-org-id', org.id);
+
+      const avg = org.donors ? org.total / org.donors : 0;
+      const pct = org.goal ? Math.round((org.total / org.goal) * 100) : 0;
+      const pctCapped = Math.min(pct, 100);
+      const fresh = getFreshness(org);
+      const dot = fresh ? `<span class="freshness-indicator ${fresh}"></span>` : '';
+
+      const ly = matchLastYear(org);
+
+      card.innerHTML = `
+        <div class="org-name">${org.name}${dot}</div>
+        ${org.error ? `<div class="error">${org.error} <button class="btn btn-small" data-retry="${org.id}">Retry</button></div>` : ''}
+        <div class="org-total">${$fmt(org.total)}</div>
+        <div class="org-stats">
+          <div class="stat-item">
+            <div class="stat-value">${nfmt(org.donors || 0)}</div>
+            <div class="stat-label">Donors</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-value">${$fmt(avg)}</div>
+            <div class="stat-label">Avg Gift</div>
+          </div>
+          <div class="stat-item goal-progress">
+            <div class="stat-label">Goal Progress</div>
+            <div class="progress-container">
+              <div class="progress-bar" style="width:${pctCapped}%"></div>
+              <div class="progress-text">${pct}%</div>
+            </div>
+          </div>
+        </div>
+
+        ${ly ? lyFooterHTML(ly) : ''}
+
+        <div class="org-actions">
+          <div class="last-updated">${org.lastUpdated ? 'Updated: ' + new Date(org.lastUpdated).toLocaleTimeString() : 'Not yet updated'}</div>
+          <div style="display:flex;gap:8px;">
+            <button class="btn btn-primary btn-small" data-refresh="${org.id}">Refresh</button>
+            <a class="btn btn-primary btn-small" target="_blank" rel="noopener noreferrer" href="${org.url}">View Page</a>
+          </div>
+        </div>
+      `;
+      grid.appendChild(card);
+    }
+  }
+
+  // ---- Data ops ----
+  async function loadAll() {
+    try {
+      const data = await api('/api/organizations');
+      orgs = data || {};
+      updateSummary();
+      render();
+    } catch (e) {
+      toast(`Failed to load: ${e.message}`, false);
+    }
+  }
+
+  async function refreshOne(id, btn) {
+    if (isRefreshing) return;
+    try {
+      btn.disabled = true;
+      btn.textContent = 'Refreshing…';
+      if (orgs[id]) prevOrgs[id] = { ...orgs[id] };
+      const data = await api(`/api/organizations/${id}/refresh`, { method: 'PUT' });
+      orgs[id] = data;
+      updateSummary();
+      render();
+      toast(`${data.name} refreshed`);
+    } catch (e) {
+      toast(`Refresh failed: ${e.message}`, false);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Refresh';
+    }
+  }
+
+  async function refreshAll() {
+    if (isRefreshing) return;
+    isRefreshing = true;
+    try {
+      if (els.refreshNowBtn) { els.refreshNowBtn.disabled = true; els.refreshNowBtn.textContent = 'Refreshing…'; }
+      prevOrgs = JSON.parse(JSON.stringify(orgs));
+      const res = await api('/api/organizations/refresh', { method: 'PUT' });
+      orgs = res.data || orgs;
+      els.lastUpdate.textContent = 'Updated: ' + new Date().toLocaleTimeString();
+      updateSummary();
+      render();
+      if (res.summary) {
+        const { success, total, errors } = res.summary;
+        toast(`Refreshed ${success}/${total}${errors ? ` (${errors} errors)` : ''}`);
+      } else {
+        toast('All organizations refreshed');
       }
-      if (numberMatch && !donors && (text.toLowerCase().includes('donor') || text.toLowerCase().includes('supporter'))) {
-        donors = toNum(numberMatch[1]);
+    } catch (e) {
+      toast(`Bulk refresh failed: ${e.message}`, false);
+    } finally {
+      isRefreshing = false;
+      if (els.refreshNowBtn) {
+        els.refreshNowBtn.disabled = false;
+        els.refreshNowBtn.textContent = 'Refresh Now';
       }
-      if (dollarMatch && !goal && text.toLowerCase().includes('goal')) {
-        goal = toNum(dollarMatch[1]);
+    }
+  }
+
+  // ---- Controls ----
+  function start() {
+    const secs = Math.max(30, parseInt(els.refreshInterval.value) || 90);
+    els.refreshInterval.value = secs;
+    if (timer) clearInterval(timer);
+    timer = setInterval(refreshAll, secs * 1000);
+    isMonitoring = true;
+    els.startBtn.style.display = 'none';
+    els.stopBtn.style.display = 'inline-block';
+    els.statusIndicator.classList.add('active');
+    els.statusText.textContent = `Auto-refreshing every ${secs}s`;
+    refreshAll();
+    toast(`Auto-refresh started (${secs}s)`);
+  }
+  function stop() {
+    isMonitoring = false;
+    if (timer) clearInterval(timer);
+    timer = null;
+    els.startBtn.style.display = 'inline-block';
+    els.stopBtn.style.display = 'none';
+    els.statusIndicator.classList.remove('active');
+    els.statusText.textContent = 'Auto-refresh stopped';
+    toast('Auto-refresh stopped');
+  }
+
+  function exportCSV() {
+    try {
+      const rows = [['Organization','Total Raised','Donors','Avg Gift','Goal','Goal %','Last Updated','Status','URL']];
+      for (const o of Object.values(orgs)) {
+        const avg = o.donors ? Math.round((o.total / o.donors) * 100) / 100 : 0;
+        const pct = o.goal ? Math.round((o.total / o.goal) * 100) : 0;
+        const last = o.lastUpdated ? new Date(o.lastUpdated).toLocaleString() : 'Never';
+        rows.push([o.name, o.total||0, o.donors||0, avg, o.goal||0, pct, last, o.error ? 'Error' : 'OK', o.url]);
+      }
+      const csv = rows.map(r => r.map(c => `"${String(c).replace(/"/g,'""')}"`).join(',')).join('\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `ntgd-${new Date().toISOString().replace(/[:T]/g,'-').slice(0,16)}.csv`;
+      document.body.appendChild(a); a.click(); a.remove();
+      toast('Data exported');
+    } catch (e) { toast(`Export failed: ${e.message}`, false); }
+  }
+
+  // ---- Events ----
+  function handleClicks(e) {
+    const r = e.target.closest('[data-refresh]');
+    const retry = e.target.closest('[data-retry]');
+    if (r) refreshOne(r.getAttribute('data-refresh'), r);
+    if (retry) {
+      const id = retry.getAttribute('data-retry');
+      const btn = els.orgs.querySelector(`[data-refresh="${id}"]`);
+      if (btn) refreshOne(id, btn);
+    }
+  }
+
+  // ---- Init ----
+  document.addEventListener('DOMContentLoaded', async () => {
+    els.orgs?.addEventListener('click', handleClicks);
+    els.startBtn?.addEventListener('click', start);
+    els.stopBtn?.addEventListener('click', stop);
+    els.refreshNowBtn?.addEventListener('click', refreshAll);
+    els.exportBtn?.addEventListener('click', exportCSV);
+    document.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'r') {
+        e.preventDefault(); refreshAll(); toast('Refreshed via keyboard');
       }
     });
+
+    await loadLastYear();
+    await loadAll();
+
+    // Background top-up every 10 mins when idle
+    setInterval(() => { if (!isMonitoring) refreshAll(); }, 600000);
   });
-
-  return { 
-    total: total || 0, 
-    donors: donors || 0, 
-    goal: goal || 0, 
-    lastUpdated: new Date().toISOString(), 
-    error: null 
-  };
-}
-
-// Data sanity protection function
-function saneMerge(prev, next, orgName = 'Unknown') {
-  const safeTotal = 
-    (next.total <= 0 || !Number.isFinite(next.total)) ? prev.total :
-    (prev.total > 0 && next.total > prev.total * 5) ? 
-      (logger.warn(`Rejecting suspicious total jump: $${prev.total} -> $${next.total} for ${orgName}`), prev.total) : 
-      next.total;
-
-  const safeDonors = 
-    (next.donors < 0 || !Number.isFinite(next.donors)) ? prev.donors : next.donors;
-
-  const safeGoal = 
-    (next.goal < 0 || !Number.isFinite(next.goal)) ? prev.goal : next.goal;
-
-  return { 
-    total: safeTotal, 
-    donors: safeDonors, 
-    goal: safeGoal,
-    lastUpdated: next.lastUpdated,
-    error: next.error
-  };
-}
-
-// --------------------------- Express App Setup ---------------------------
-const app = express();
-
-// Request logging middleware
-const logRequest = (req, res, next) => {
-  const start = Date.now();
-  const originalSend = res.send;
-  
-  res.send = function(data) {
-    const duration = Date.now() - start;
-    logger.info(`${req.method} ${req.path} - ${res.statusCode} (${duration}ms)`);
-    originalSend.call(this, data);
-  };
-  
-  next();
-};
-
-app.use(logRequest);
-
-// Security / CORS
-app.use(helmet());
-if (config.allowedOrigins.length) {
-  app.use(cors({
-    origin: (origin, cb) => {
-      if (!origin || config.allowedOrigins.includes(origin)) return cb(null, true);
-      return cb(new Error('Not allowed by CORS'), false);
-    }
-  }));
-} else {
-  app.use(cors());
-}
-
-app.use(express.json());
-
-// Static files
-app.use(express.static(path.join(__dirname, '..', 'public')));
-
-// Rate limiting
-if (rateLimit) {
-  app.use('/api', rateLimit({ 
-    windowMs: config.rateLimitWindowMs, 
-    max: config.rateLimitMaxRequests,
-    standardHeaders: true, 
-    legacyHeaders: false,
-    message: {
-      error: 'Too many requests, please try again later',
-      retryAfter: '60 seconds'
-    },
-    skip: (req) => req.path === '/api/health' || req.path === '/api/ping'
-  }));
-}
-
-// Initialize organizations data
-let organizationsData = {};
-for (const { name, url } of config.organizations) {
-  const id = urlToId(url);
-  if (!id) continue;
-  organizationsData[id] = { 
-    id, name, url, 
-    total: 0, donors: 0, goal: 0, 
-    lastUpdated: null, error: null 
-  };
-}
-
-logger.info(`Initialized ${Object.keys(organizationsData).length} organizations`);
-
-// --------------------------- API Routes ---------------------------
-
-// Health check
-app.get('/api/health', (req, res) => {
-  const orgs = Object.values(organizationsData);
-  res.json({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-    organizations: orgs.length,
-    lastUpdate: orgs.reduce((latest, org) => {
-      if (!org.lastUpdated) return latest;
-      const orgTime = new Date(org.lastUpdated).getTime();
-      return orgTime > latest ? orgTime : latest;
-    }, 0),
-    dependencies: {
-      axios: !!axios,
-      cheerio: !!cheerio
-    }
-  });
-});
-
-// Legacy ping endpoint
-app.get('/api/ping', (req, res) => res.json({ ok: true, ts: Date.now() }));
-
-// Debug info
-app.get('/api/_debug', (req, res) => {
-  const keys = Object.keys(organizationsData || {});
-  res.json({ count: keys.length, keys, axios: !!axios, cheerio: !!cheerio });
-});
-
-// Configuration endpoint
-app.get('/api/config', (req, res) => {
-  const safeConfig = {
-    nodeEnv: config.nodeEnv,
-    organizationCount: config.organizations.length,
-    batchDelayMs: config.batchDelayMs,
-    requestTimeoutMs: config.requestTimeoutMs,
-    maxRetries: config.maxRetries,
-    dependencies: {
-      axios: !!axios,
-      cheerio: !!cheerio,
-      rateLimit: !!rateLimit,
-      cors: !!cors,
-      helmet: !!helmet
-    }
-  };
-  
-  if (config.nodeEnv === 'development') {
-    safeConfig.organizations = config.organizations.map(org => ({
-      name: org.name,
-      hasUrl: !!org.url
-    }));
-  }
-  
-  res.json(safeConfig);
-});
-
-// Metrics endpoint
-app.get('/api/metrics', (req, res) => {
-  const orgs = Object.values(organizationsData);
-  
-  const metrics = {
-    timestamp: new Date().toISOString(),
-    organizations: {
-      total: orgs.length,
-      withErrors: orgs.filter(o => o.error).length,
-      lastUpdated: orgs.reduce((latest, org) => {
-        if (!org.lastUpdated) return latest;
-        const orgTime = new Date(org.lastUpdated).getTime();
-        return orgTime > latest ? orgTime : latest;
-      }, 0),
-      averageRefreshDuration: orgs
-        .filter(o => o.lastRefreshDuration)
-        .reduce((sum, o, _, arr) => sum + o.lastRefreshDuration / arr.length, 0)
-    },
-    fundraising: {
-      totalRaised: orgs.reduce((sum, o) => sum + (o.total || 0), 0),
-      totalDonors: orgs.reduce((sum, o) => sum + (o.donors || 0), 0),
-      totalGoal: orgs.reduce((sum, o) => sum + (o.goal || 0), 0),
-      organizationsWithGoals: orgs.filter(o => o.goal > 0).length
-    },
-    system: {
-      uptime: process.uptime(),
-      nodeVersion: process.version,
-      dependencies: {
-        axios: !!axios,
-        cheerio: !!cheerio
-      }
-    }
-  };
-  
-  res.json(metrics);
-});
-
-// Read all organizations
-app.get('/api/organizations', (req, res) => res.json(organizationsData));
-
-// Refresh single organization with sanity protection
-app.put('/api/organizations/:id/refresh', async (req, res) => {
-  const id = String(req.params.id || '').toLowerCase();
-  const org = organizationsData[id];
-  
-  if (!org) {
-    return res.status(404).json({ error: 'Organization not found' });
-  }
-  
-  if (!axios || !cheerio) {
-    const error = 'Scraper dependencies unavailable';
-    organizationsData[id] = {
-      ...org,
-      error,
-      lastUpdated: new Date().toISOString()
-    };
-    return res.status(503).json(organizationsData[id]);
-  }
-
-  const startTime = Date.now();
-  
-  try {
-    logger.debug(`Starting refresh for ${org.name} (${org.url})`);
-    
-    const resp = await getWithRetry(org.url, config.maxRetries);
-    const data = extractFundraisingData(resp.data);
-    
-    const duration = Date.now() - startTime;
-    logger.info(`Completed ${org.name} in ${duration}ms - Total: $${data.total}, Donors: ${data.donors}`);
-    
-    // Apply sanity checking to prevent bad data
-    const saneData = saneMerge(org, data, org.name);
-    const updatedOrg = {
-      ...org,
-      ...saneData,
-      lastRefreshDuration: duration
-    };
-    
-    organizationsData[id] = updatedOrg;
-    res.json(updatedOrg);
-    
-  } catch (e) {
-    const duration = Date.now() - startTime;
-    let errorType = 'unknown';
-    let errorMessage = e.message;
-    
-    // Categorize errors
-    if (e.code === 'ENOTFOUND' || e.code === 'ECONNREFUSED') {
-      errorType = 'network';
-      errorMessage = 'Network connection failed';
-    } else if (e.response?.status === 404) {
-      errorType = 'not_found';
-      errorMessage = 'Page not found';
-    } else if (e.response?.status === 429) {
-      errorType = 'rate_limited';
-      errorMessage = 'Rate limited by server';
-    } else if (e.response?.status >= 500) {
-      errorType = 'server_error';
-      errorMessage = 'Server error';
-    } else if (e.code === 'ECONNABORTED' || e.message.includes('timeout')) {
-      errorType = 'timeout';
-      errorMessage = 'Request timed out';
-    }
-    
-    logger.error(`${org.name}: ${errorType} - ${errorMessage} (${duration}ms)`);
-    
-    organizationsData[id] = {
-      ...org,
-      error: `${errorType}: ${errorMessage}`,
-      lastUpdated: new Date().toISOString(),
-      lastRefreshDuration: duration
-    };
-    
-    res.status(502).json(organizationsData[id]);
-  }
-});
-
-// Bulk refresh with sanity protection
-app.put('/api/organizations/refresh', async (req, res) => {
-  const startTime = Date.now();
-  const results = {};
-  const errors = [];
-  const orgIds = Object.keys(organizationsData);
-  
-  logger.info(`Starting bulk refresh of ${orgIds.length} organizations`);
-  
-  for (const [index, id] of orgIds.entries()) {
-    const org = organizationsData[id];
-    
-    if (!axios || !cheerio) {
-      organizationsData[id] = {
-        ...org,
-        error: 'Scraper unavailable',
-        lastUpdated: new Date().toISOString()
-      };
-      results[id] = 'skipped';
-      continue;
-    }
-    
-    try {
-      const resp = await getWithRetry(org.url, config.maxRetries);
-      const data = extractFundraisingData(resp.data);
-      
-      // Apply sanity checking to prevent bad data
-      const saneData = saneMerge(org, data, org.name);
-      organizationsData[id] = {
-        ...org,
-        ...saneData
-      };
-      
-      results[id] = 'success';
-      
-    } catch (e) {
-      const errorMsg = `Failed to refresh: ${e.message}`;
-      organizationsData[id] = {
-        ...org,
-        error: errorMsg,
-        lastUpdated: new Date().toISOString()
-      };
-      
-      results[id] = 'error';
-      errors.push({ org: org.name, error: errorMsg });
-    }
-    
-    // Add delay between requests
-    if (index < orgIds.length - 1) {
-      await sleep(config.batchDelayMs);
-    }
-  }
-  
-  const duration = Date.now() - startTime;
-  const successCount = Object.values(results).filter(r => r === 'success').length;
-  const errorCount = Object.values(results).filter(r => r === 'error').length;
-  
-  logger.info(`Bulk refresh completed in ${duration}ms - Success: ${successCount}, Errors: ${errorCount}`);
-  
-  res.json({ 
-    message: 'Bulk refresh completed', 
-    results, 
-    data: organizationsData,
-    summary: {
-      total: orgIds.length,
-      success: successCount,
-      errors: errorCount,
-      duration: duration
-    },
-    errors: errors.length > 0 ? errors : undefined
-  });
-});
-
-// Summary endpoint
-app.get('/api/summary', (req, res) => {
-  const orgs = Object.values(organizationsData);
-  const totalRaised = orgs.reduce((s, o) => s + (o.total || 0), 0);
-  const totalDonors = orgs.reduce((s, o) => s + (o.donors || 0), 0);
-  const totalGoal   = orgs.reduce((s, o) => s + (o.goal   || 0), 0);
-  res.json({
-    organizationCount: orgs.length,
-    totalRaised,
-    totalDonors,
-    totalGoal,
-    averageGift: totalDonors > 0 ? Math.round((totalRaised / totalDonors) * 100) / 100 : 0,
-    lastUpdated: new Date().toISOString()
-  });
-});
-
-// CSV export endpoint
-app.get('/api/export.csv', (req, res) => {
-  const orgs = Object.values(organizationsData);
-  const headers = ['Organization', 'Total Raised', 'Donors', 'Avg Gift', 'Goal', 'Goal %', 'Last Updated', 'Status'];
-  
-  const rows = [headers.join(',')];
-  
-  orgs.forEach(org => {
-    const avgGift = org.donors > 0 ? (org.total / org.donors).toFixed(2) : '0.00';
-    const goalPercent = org.goal > 0 ? Math.round((org.total / org.goal) * 100) : 0;
-    const lastUpdated = org.lastUpdated ? new Date(org.lastUpdated).toLocaleString() : 'Never';
-    const status = org.error ? 'Error' : 'OK';
-    
-    const row = [
-      `"${org.name}"`,
-      org.total || 0,
-      org.donors || 0,
-      avgGift,
-      org.goal || 0,
-      goalPercent,
-      `"${lastUpdated}"`,
-      `"${status}"`
-    ];
-    rows.push(row.join(','));
-  });
-  
-  const csv = rows.join('\n');
-  const timestamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 16);
-  
-  res.setHeader('Content-Type', 'text/csv');
-  res.setHeader('Content-Disposition', `attachment; filename="ntgd-export-${timestamp}.csv"`);
-  res.send(csv);
-});
-
-// Frontend route for local dev
-app.get('/', (req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'index.html')));
-
-// Handle unknown API routes
-app.use('/api/*', (req, res) => {
-  res.status(404).json({ error: 'API endpoint not found' });
-});
-
-// Error handling middleware
-const errorHandler = (err, req, res, next) => {
-  logger.error('Request error:', {
-    method: req.method,
-    path: req.path,
-    error: err.message,
-    stack: config.nodeEnv === 'development' ? err.stack : undefined
-  });
-
-  const isDev = config.nodeEnv !== 'production';
-  
-  res.status(err.status || 500).json({
-    error: isDev ? err.message : 'Internal server error',
-    ...(isDev && { stack: err.stack })
-  });
-};
-
-app.use(errorHandler);
-
-module.exports = app;
+})();

@@ -1,17 +1,16 @@
 {
   "version": 2,
-  "functions": { 
-    "api/index.js": { "maxDuration": 30 } 
+  "functions": {
+    "api/index.js": { "maxDuration": 30 }
   },
   "routes": [
     { "src": "^/api/(.*)$", "dest": "/api/index.js" },
     { "handle": "filesystem" },
     { "src": "/(.*)", "dest": "/public/index.html" }
   ],
-  "crons": [
-    {
-      "path": "/api/organizations/refresh",
-      "schedule": "*/15 8-20 * * *"
-    }
+  "headers": [
+    { "source": "/(index.html)?", "headers": [{ "key": "Cache-Control", "value": "no-store" }] },
+    { "source": "/app.js", "headers": [{ "key": "Cache-Control", "value": "no-store" }] },
+    { "source": "/data/(.*)", "headers": [{ "key": "Cache-Control", "value": "no-store" }] }
   ]
 }

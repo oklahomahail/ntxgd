@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>North Texas Giving Day 2024 Results</title>
+  <style>
+    * { 
+      margin: 0; 
+      padding: 0; 
+      box-sizing: border-box; 
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Helvetica Neue', Arial, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: #2c3e50;
+      line-height: 1.6;
+      min-height: 100vh;
+      padding: 40px 20px;
+    }
+    
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+    
+    .header {
+      text-align: center;
+      margin-bottom: 60px;
+      color: white;
+    }
+    
+    .header h1 {
+      font-size: 4em;
+      font-weight: 300;
+      margin-bottom: 20px;
+      text-shadow: 0 4px 8px rgba(0,0,0,0.3);
+      letter-spacing: -2px;
+    }
+    
+    .header .year {
+      display: block;
+      font-size: 0.6em;
+      color: rgba(255,255,255,0.8);
+      font-weight: 400;
+      margin-top: 10px;
+    }
+    
+    .header p {
+      font-size: 1.4em;
+      opacity: 0.9;
+      max-width: 700px;
+      margin: 20px auto 0;
+      font-weight: 300;
+    }
+    
+    .stats-overview {
+      background: rgba(255,255,255,0.95);
+      backdrop-filter: blur(20px);
+      border-radius: 24px;
+      padding: 50px 40px;
+      margin-bottom: 50px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.1);
+      border: 1px solid rgba(255,255,255,0.2);
+    }
+    
+    .overview-title {
+      text-align: center;
+      font-size: 2.2em;
+      font-weight: 300;
+      margin-bottom: 40px;
+      color: #2c3e50;
+    }
+    
+    .overview-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 40px;
+      text-align: center;
+    }
+    
+    .overview-item {
+      padding: 20px;
+      background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+      border-radius: 16px;
+      transition: transform 0.3s ease;
+    }
+    
+    .overview-item:hover {
+      transform: translateY(-5px);
+    }
+    
+    .overview-value {
+      font-size: 3em;
+      font-weight: 300;
+      color: #27ae60;
+      margin-bottom: 15px;
+      letter-spacing: -1px;
+    }
+    
+    .overview-label {
+      font-size: 1em;
+      color: #7f8c8d;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      font-weight: 600;
+    }
+    
+    .organizations-section {
+      background: rgba(255,255,255,0.95);
+      backdrop-filter: blur(20px);
+      border-radius: 24px;
+      padding: 50px 40px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.1);
+      border: 1px solid rgba(255,255,255,0.2);
+    }
+    
+    .section-title {
+      text-align: center;
+      font-size: 2.2em;
+      font-weight: 300;
+      margin-bottom: 50px;
+      color: #2c3e50;
+    }
+    
+    .organizations-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+      gap: 40px;
+    }
+    
+    .org-card {
+      background: white;
+      border-radius: 20px;
+      padding: 40px;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.08);
+      transition: all 0.4s ease;
+      border: 1px solid #f1f3f4;
+      position: relative;
+      overflow: hidden;
+    }
+    
+    .org-card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 4px;
+      background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+    }
+    
+    .org-card:hover {
+      transform: translateY(-8px);
+      box-shadow: 0 20px 60px rgba(0,0,0,0.12);
+    }
+    
+    .org-name {
+      font-size: 1.5em;
+      font-weight: 600;
+      margin-bottom: 30px;
+      color: #2c3e50;
+      line-height: 1.3;
+    }
+    
+    .org-totals {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 30px;
+      margin-bottom: 40px;
+      padding-bottom: 30px;
+      border-bottom: 2px solid #f8f9fa;
+    }
+    
+    .total-item {
+      text-align: center;
+      padding: 20px 15px;
+      background: #f8f9fa;
+      border-radius: 12px;
+      transition: all 0.3s ease;
+    }
+    
+    .total-item:hover {
+      background: #e9ecef;
+      transform: scale(1.05);
+    }
+    
+    .total-value {
+      font-size: 2em;
+      font-weight: 300;
+      color: #27ae60;
+      margin-bottom: 8px;
+      letter-spacing: -0.5px;
+    }
+    
+    .total-label {
+      font-size: 0.85em;
+      color: #6c757d;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      font-weight: 600;
+    }
+    
+    .time-breakdown {
+      padding-top: 30px;
+    }
+    
+    .time-breakdown h4 {
+      font-size: 1.1em;
+      color: #495057;
+      text-align: center;
+      margin-bottom: 25px;
+      font-weight: 600;
+    }
+    
+    .time-chart {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      height: 140px;
+      background: linear-gradient(to top, #f8f9fa 0%, #ffffff 100%);
+      border-radius: 16px;
+      padding: 25px 20px;
+      gap: 15px;
+      box-shadow: inset 0 2px 10px rgba(0,0,0,0.05);
+    }
+    
+    .time-bar {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      cursor: pointer;
+      transition: all 0.4s ease;
+      padding: 10px 5px;
+      border-radius: 8px;
+    }
+    
+    .time-bar:hover {
+      transform: scale(1.08);
+      background: rgba(102, 126, 234, 0.1);
+    }
+    
+    .time-bar-column {
+      width: 100%;
+      background: linear-gradient(180deg, #667eea 0%, #764ba2 100%);
+      border-radius: 10px 10px 4px 4px;
+      min-height: 10px;
+      transition: all 0.4s ease;
+      position: relative;
+      box-shadow: 0 6px 20px rgba(102, 126, 234, 0.3);
+    }
+    
+    .time-bar:hover .time-bar-column {
+      background: linear-gradient(180deg, #5a67d8 0%, #6b46c1 100%);
+      box-shadow: 0 10px 30px rgba(102, 126, 234, 0.4);
+    }
+    
+    .time-bar-percent {
+      font-size: 1em;
+      font-weight: 700;
+      color: #2c3e50;
+      text-shadow: 0 1px 3px rgba(255,255,255,0.8);
+    }
+    
+    .time-bar-label {
+      font-size: 0.75em;
+      color: #6c757d;
+      text-align: center;
+      line-height: 1.2;
+      font-weight: 500;
+    }
+    
+    .loading {
+      text-align: center;
+      padding: 100px 20px;
+      color: white;
+    }
+    
+    .spinner {
+      border: 4px solid rgba(255,255,255,0.3);
+      border-top: 4px solid white;
+      border-radius: 50%;
+      width: 50px;
+      height: 50px;
+      animation: spin 1s linear infinite;
+      margin: 0 auto 30px;
+    }
+    
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    
+    .error-message {
+      background: rgba(231, 76, 60, 0.1);
+      border: 2px solid #e74c3c;
+      color: #c0392b;
+      padding: 30px;
+      border-radius: 16px;
+      text-align: center;
+      margin: 40px 0;
+      font-size: 1.1em;
+    }
+    
+    .footer {
+      text-align: center;
+      margin-top: 60px;
+      color: rgba(255,255,255,0.8);
+      font-size: 0.9em;
+    }
+    
+    @media (max-width: 768px) {
+      body {
+        padding: 20px 10px;
+      }
+      
+      .header h1 {
+        font-size: 2.5em;
+      }
+      
+      .header p {
+        font-size: 1.1em;
+      }
+      
+      .stats-overview {
+        padding: 30px 20px;
+      }
+      
+      .overview-grid {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 25px;
+      }
+      
+      .overview-value {
+        font-size: 2.2em;
+      }
+      
+      .organizations-grid {
+        grid-template-columns: 1fr;
+      }
+      
+      .org-card {
+        padding: 30px 20px;
+      }
+      
+      .org-totals {
+        grid-template-columns: 1fr;
+        gap: 20px;
+        text-align: center;
+      }
+      
+      .time-chart {
+        height: 120px;
+        padding: 20px 15px;
+        gap: 10px;
+      }
+      
+      .organizations-section {
+        padding: 30px 20px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>North Texas Giving Day<span class="year">2024 Results</span></h1>
+      <p>Celebrating the incredible generosity and community impact from last year's giving day</p>
+    </div>
+    
+    <div class="stats-overview" id="overviewContainer">
+      <div class="loading">
+        <div class="spinner"></div>
+        <p>Loading 2024 results...</p>
+      </div>
+    </div>
+    
+    <div class="organizations-section">
+      <h2 class="section-title">Organization Results</h2>
+      <div class="organizations-grid" id="organizationsContainer">
+        <div class="loading">
+          <div class="spinner"></div>
+          <p>Loading organization details...</p>
+        </div>
+      </div>
+    </div>
+    
+    <div class="footer">
+      <p>North Texas Giving Day • Supporting our community one donation at a time</p>
+    </div>
+  </div>
+
+  <script>
+    // Your actual JSON data embedded directly
+    const lastYearData = [
+      {
+        "orgId": "bbhh",
+        "orgName": "Brother Bill's Helping Hand",
+        "totals": {
+          "donors": 94,
+          "dollars": 94228,
+          "gifts": 115
+        },
+        "dayOf": [
+          { "label": "Before 10am", "percent": 19.1 },
+          { "label": "10am–1pm", "percent": 22.6 },
+          { "label": "1–5pm", "percent": 29.6 },
+          { "label": "5–10pm", "percent": 20.0 },
+          { "label": "After 10pm", "percent": 8.7 }
+        ]
+      },
+      {
+        "orgId": "casa-del-lago",
+        "orgName": "Casa del Lago",
+        "totals": {
+          "donors": 27,
+          "dollars": 9623,
+          "gifts": 29
+        },
+        "dayOf": [
+          { "label": "Before 10am", "percent": 20.7 },
+          { "label": "10am–1pm", "percent": 10.3 },
+          { "label": "1–5pm", "percent": 31.0 },
+          { "label": "5–10pm", "percent": 17.2 },
+          { "label": "After 10pm", "percent": 20.7 }
+        ]
+      },
+      {
+        "orgId": "dallas-life-homeless-shelter",
+        "orgName": "Dallas LIFE",
+        "totals": {
+          "donors": 101,
+          "dollars": 50092,
+          "gifts": 128
+        },
+        "dayOf": [
+          { "label": "Before 10am", "percent": 4.7 },
+          { "label": "10am–1pm", "percent": 17.2 },
+          { "label": "1–5pm", "percent": 26.6 },
+          { "label": "5–10pm", "percent": 37.5 },
+          { "label": "After 10pm", "percent": 14.1 }
+        ]
+      },
+      {
+        "orgId": "the-kessler-school",
+        "orgName": "The Kessler School",
+        "totals": {
+          "donors": 46,
+          "dollars": 4965,
+          "gifts": 49
+        },
+        "dayOf": [
+          { "label": "Before 10am", "percent": 28.6 },
+          { "label": "10am–1pm", "percent": 32.7 },
+          { "label": "1–5pm", "percent": 22.4 },
+          { "label": "5–10pm", "percent": 16.3 },
+          { "label": "After 10pm", "percent": 0.0 }
+        ]
+      },
+      {
+        "orgId": "citybridge-health-foundation",
+        "orgName": "CityBridge Health Foundation",
+        "totals": {
+          "donors": 32,
+          "dollars": 8750,
+          "gifts": 35
+        },
+        "dayOf": [
+          { "label": "Before 10am", "percent": 15.0 },
+          { "label": "10am–1pm", "percent": 25.0 },
+          { "label": "1–5pm", "percent": 35.0 },
+          { "label": "5–10pm", "percent": 20.0 },
+          { "label": "After 10pm", "percent": 5.0 }
+        ]
+      },
+      {
+        "orgId": "darcc",
+        "orgName": "Dallas Area Rape Crisis Center (DARCC)",
+        "totals": {
+          "donors": 49,
+          "dollars": 10753,
+          "gifts": 58
+        },
+        "dayOf": [
+          { "label": "Before 10am", "percent": 6.9 },
+          { "label": "10am–1pm", "percent": 24.1 },
+          { "label": "1–5pm", "percent": 25.9 },
+          { "label": "5–10pm", "percent": 36.2 },
+          { "label": "After 10pm", "percent": 6.9 }
+        ]
+      },
+      {
+        "orgId": "isf",
+        "orgName": "International Student Foundation (ISF)",
+        "totals": {
+          "donors": 7,
+          "dollars": 1350,
+          "gifts": 7
+        },
+        "dayOf": [
+          { "label": "Before 10am", "percent": 14.3 },
+          { "label": "10am–1pm", "percent": 0.0 },
+          { "label": "1–5pm", "percent": 71.4 },
+          { "label": "5–10pm", "percent": 14.3 },
+          { "label": "After 10pm", "percent": 0.0 }
+        ]
+      },
+      {
+        "orgId": "girlstart",
+        "orgName": "Girlstart",
+        "totals": {
+          "donors": 17,
+          "dollars": 1268,
+          "gifts": 17
+        },
+        "dayOf": [
+          { "label": "Before 10am", "percent": 11.8 },
+          { "label": "10am–1pm", "percent": 11.8 },
+          { "label": "1–5pm", "percent": 11.8 },
+          { "label": "5–10pm", "percent": 64.7 },
+          { "label": "After 10pm", "percent": 0.0 }
+        ]
+      }
+    ];
+
+    // Formatters
+    const $fmt = n => new Intl.NumberFormat('en-US', { 
+      style: 'currency', 
+      currency: 'USD', 
+      maximumFractionDigits: 0 
+    }).format(n || 0);
+
+    const nfmt = n => new Intl.NumberFormat('en-US').format(n || 0);
+
+    // Load and render data
+    function loadData() {
+      // Simulate loading delay for better UX
+      setTimeout(() => {
+        renderOverview(lastYearData);
+        renderOrganizations(lastYearData);
+      }, 1200);
+    }
+
+    function renderOverview(data) {
+      const totals = data.reduce((acc, org) => {
+        acc.totalDollars += org.totals?.dollars || 0;
+        acc.totalDonors += org.totals?.donors || 0;
+        acc.totalGifts += org.totals?.gifts || 0;
+        acc.totalOrgs += 1;
+        return acc;
+      }, { totalDollars: 0, totalDonors: 0, totalGifts: 0, totalOrgs: 0 });
+
+      const avgGift = totals.totalDonors ? totals.totalDollars / totals.totalDonors : 0;
+
+      document.getElementById('overviewContainer').innerHTML = `
+        <h2 class="overview-title">2024 Campaign Overview</h2>
+        <div class="overview-grid">
+          <div class="overview-item">
+            <div class="overview-value">${$fmt(totals.totalDollars)}</div>
+            <div class="overview-label">Total Raised</div>
+          </div>
+          <div class="overview-item">
+            <div class="overview-value">${nfmt(totals.totalDonors)}</div>
+            <div class="overview-label">Total Donors</div>
+          </div>
+          <div class="overview-item">
+            <div class="overview-value">${nfmt(totals.totalGifts)}</div>
+            <div class="overview-label">Total Gifts</div>
+          </div>
+          <div class="overview-item">
+            <div class="overview-value">${$fmt(avgGift)}</div>
+            <div class="overview-label">Average Gift</div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderOrganizations(data) {
+      const container = document.getElementById('organizationsContainer');
+      
+      // Sort by dollars raised, highest first
+      const sortedData = [...data].sort((a, b) => (b.totals?.dollars || 0) - (a.totals?.dollars || 0));
+      
+      const cardsHTML = sortedData.map(org => {
+        const timeBarsHTML = (org.dayOf || []).map(timeSlot => {
+          const height = Math.max(10, Math.min(100, timeSlot.percent || 0));
+          return `
+            <div class="time-bar" title="${timeSlot.label}: ${timeSlot.percent}%">
+              <div class="time-bar-column" style="height: ${height}%"></div>
+              <div class="time-bar-percent">${Math.round(timeSlot.percent || 0)}%</div>
+              <div class="time-bar-label">${timeSlot.label}</div>
+            </div>
+          `;
+        }).join('');
+
+        return `
+          <div class="org-card">
+            <div class="org-name">${org.orgName}</div>
+            <div class="org-totals">
+              <div class="total-item">
+                <div class="total-value">${$fmt(org.totals?.dollars || 0)}</div>
+                <div class="total-label">Raised</div>
+              </div>
+              <div class="total-item">
+                <div class="total-value">${nfmt(org.totals?.donors || 0)}</div>
+                <div class="total-label">Donors</div>
+              </div>
+              <div class="total-item">
+                <div class="total-value">${nfmt(org.totals?.gifts || 0)}</div>
+                <div class="total-label">Gifts</div>
+              </div>
+            </div>
+            <div class="time-breakdown">
+              <h4>Giving Throughout the Day</h4>
+              <div class="time-chart">
+                ${timeBarsHTML}
+              </div>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      container.innerHTML = cardsHTML;
+    }
+
+    function showError(message) {
+      document.getElementById('overviewContainer').innerHTML = `
+        <div class="error-message">
+          <h3>Error Loading Data</h3>
+          <p>${message}</p>
+        </div>
+      `;
+      document.getElementById('organizationsContainer').innerHTML = '';
+    }
+
+    // Initialize when page loads
+    document.addEventListener('DOMContentLoaded', loadData);
+  </script>
+</body>
+</html>

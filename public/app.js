@@ -1,4 +1,4 @@
-/* NTXGD Monitor — inline "Last year" footer (no flip) */
+/* NTGD Monitor - Clean version with last year stats */
 (() => {
   // --- Element refs ---
   const els = {
@@ -15,19 +15,25 @@
     statusText: document.getElementById('statusText'),
     lastUpdate: document.getElementById('lastUpdate'),
     refreshInterval: document.getElementById('refreshInterval'),
-    headerDescription: document.getElementById('headerDescription')
+    headerDescription: document.getElementById('headerDescription'),
+    lastYearContainer: document.getElementById('lastYearStatsContainer')
   };
 
   // --- State ---
-  let orgs = {};                 // { id -> {id,name,url,total,donors,goal,lastUpdated,error} }
+  let orgs = {};
   let prevOrgs = {};
   let isRefreshing = false;
   let isMonitoring = false;
   let timer = null;
-  let lastYearStats = null;      // array of rows from /data/ntxgd_last_year.json
+  let lastYearStats = null;
 
   // --- Formatters ---
-  const $fmt = n => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(n || 0);
+  const $fmt = n => new Intl.NumberFormat('en-US', { 
+    style: 'currency', 
+    currency: 'USD', 
+    maximumFractionDigits: 0 
+  }).format(n || 0);
+  
   const nfmt = n => new Intl.NumberFormat('en-US').format(n || 0);
 
   // --- Toast ---
@@ -51,7 +57,11 @@
     const ctrl = new AbortController();
     const to = setTimeout(() => ctrl.abort(), 30000);
     try {
-      const res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, signal: ctrl.signal, ...opts });
+      const res = await fetch(path, { 
+        headers: { 'Content-Type': 'application/json' }, 
+        signal: ctrl.signal, 
+        ...opts 
+      });
       clearTimeout(to);
       if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(()=>'Error')}`);
       return res.json();
@@ -61,36 +71,121 @@
       throw e;
     }
   }
-// Tiny inline footer + micro bars for last-year
-function lyFooterHTML(ly) {
-  if (!ly) {
-    return `<div class="ly-footer" style="margin-top:20px;padding-top:14px;border-top:1px solid #e8e8e8;color:#95a5a6;font-size:12px;">
-      Last year: no data
-    </div>`;
+
+  // --- Load last year data ---
+  async function loadLastYear() {
+    try {
+      const res = await fetch('/data/ntxgd_last_year.json?v=ly-4', { cache: 'no-store' });
+      lastYearStats = await res.json();
+      renderLastYearStats();
+    } catch (e) {
+      console.log('Last year data not available:', e);
+      if (els.lastYearContainer) {
+        els.lastYearContainer.innerHTML = '<p style="text-align:center;color:#7f8c8d;">Last year data not available</p>';
+      }
+    }
   }
 
-  const fmtN = (n) => (n || 0).toLocaleString();
-  const bars = (ly.dayOf || []).map(b => {
-    const h = Math.max(2, Math.min(100, b.percent || 0));
-    return `<div title="${b.label}: ${Math.round(b.percent)}%" style="display:inline-block;width:8px;height:${h}px;margin:0 2px;vertical-align:bottom;background:#d5d5d5;border-radius:2px;"></div>`;
-  }).join('');
+  // --- Render last year stats block ---
+  function renderLastYearStats() {
+    if (!lastYearStats || !lastYearStats.length || !els.lastYearContainer) {
+      if (els.lastYearContainer) {
+        els.lastYearContainer.innerHTML = '<p style="text-align:center;color:#7f8c8d;">No last year data available</p>';
+      }
+      return;
+    }
 
-  return `
-    <div class="ly-footer" style="margin-top:20px;padding-top:14px;border-top:1px solid #e8e8e8;">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;">
-        <div style="font-size:13px;color:#7f8c8d;">
-          <strong>Last year:</strong>
-          ${fmtN(ly.totals?.donors)} donors •
-          $${fmtN(ly.totals?.dollars)} •
-          ${fmtN(ly.totals?.gifts)} gifts
+    const statsHTML = lastYearStats.map(org => {
+      const timeBarsHTML = (org.dayOf || []).map(timeSlot => {
+        const height = Math.max(4, Math.min(100, timeSlot.percent || 0));
+        return `
+          <div class="time-bar">
+            <div class="time-bar-col" style="height: ${height}%"></div>
+            <div class="time-bar-percent">${Math.round(timeSlot.percent || 0)}%</div>
+            <div class="time-bar-label">${timeSlot.label}</div>
+          </div>
+        `;
+      }).join('');
+
+      return `
+        <div class="stat-org-card">
+          <div class="stat-org-name">${org.orgName}</div>
+          <div class="stat-totals">
+            <div class="stat-total-item">
+              <div class="stat-total-value">${$fmt(org.totals?.dollars || 0)}</div>
+              <div class="stat-total-label">Raised</div>
+            </div>
+            <div class="stat-total-item">
+              <div class="stat-total-value">${nfmt(org.totals?.donors || 0)}</div>
+              <div class="stat-total-label">Donors</div>
+            </div>
+            <div class="stat-total-item">
+              <div class="stat-total-value">${nfmt(org.totals?.gifts || 0)}</div>
+              <div class="stat-total-label">Gifts</div>
+            </div>
+          </div>
+          <div class="time-breakdown">
+            <h4>Time of Day Breakdown</h4>
+            <div class="time-bars">
+              ${timeBarsHTML}
+            </div>
+          </div>
         </div>
-        <div aria-label="Last year time-of-day breakdown" style="height:64px;display:flex;align-items:flex-end;">
-          ${bars}
+      `;
+    }).join('');
+
+    els.lastYearContainer.innerHTML = `<div class="stats-grid">${statsHTML}</div>`;
+  }
+
+  // --- Last year matching functions ---
+  const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  
+  function matchLastYear(org) {
+    if (!lastYearStats) return null;
+    
+    // Try exact ID match first
+    const bySlug = lastYearStats.find(d => 
+      (d.orgId || '').toLowerCase() === (org.id || '').toLowerCase()
+    );
+    if (bySlug) return bySlug;
+    
+    // Try name matching
+    const key = norm(org.name);
+    return lastYearStats.find(d => norm(d.orgName) === key) || null;
+  }
+
+  function lyFooterHTML(ly) {
+    if (!ly) return '';
+    
+    const donors = ly.totals?.donors || 0;
+    const dollars = ly.totals?.dollars || 0;
+    const gifts = ly.totals?.gifts || 0;
+    
+    const barsHTML = (ly.dayOf || []).map(b => {
+      const pct = Number(b.percent) || 0;
+      const h = Math.max(2, Math.min(100, pct));
+      return `
+        <div class="ly-bar">
+          <div class="col" style="height:${h}%"></div>
+          <div class="pct">${pct}%</div>
+          <div class="lab">${b.label}</div>
+        </div>`;
+    }).join('');
+
+    return `
+      <div class="ly-footer">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+          <div style="font:600 12px/1.2 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto;color:#7f8c8d;">
+            Last year: <span style="color:#2c3e50">${$fmt(dollars)}</span> • <span style="color:#2c3e50">${nfmt(donors)}</span> donors • <span style="color:#2c3e50">${nfmt(gifts)}</span> gifts
+          </div>
+          <div style="font:600 12px/1.2 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto;color:#7f8c8d;">Time of day</div>
         </div>
-      </div>
-    </div>
-  `;
-}
+        <div class="ly-chart">
+          <div class="ly-bars">${barsHTML}</div>
+        </div>
+      </div>`;
+  }
+
   // --- Freshness ---
   function getFreshness(org) {
     if (!org.lastUpdated) return null;
@@ -99,67 +194,11 @@ function lyFooterHTML(ly) {
     if (secs < 900) return 'stale';
     return 'very-stale';
   }
+
   function wasUpdated(id) {
     const a = orgs[id], b = prevOrgs[id];
     if (!a || !b) return false;
     return a.total !== b.total || a.donors !== b.donors || a.goal !== b.goal;
-  }
-
-  // --- Last year support ---
-  async function loadLastYear() {
-    try {
-      const r = await fetch('/data/ntxgd_last_year.json', { cache: 'no-store' });
-      lastYearStats = await r.json();
-    } catch { /* optional */ }
-    async function loadLastYearStats() {
-  try {
-    const v = 'ly-2'; // bump when you update JSON
-    const res = await fetch(`/data/ntxgd_last_year.json?v=${v}`, { cache: 'no-store' });
-    lastYearStats = await res.json();
-  } catch (e) {
-    console.log('Last year data not available');
-  }
-}
-  }
-  const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-  function matchLastYear(org) {
-    if (!lastYearStats) return null;
-    const bySlug = lastYearStats.find(d => (d.orgId || '').toLowerCase() === (org.id || '').toLowerCase());
-    if (bySlug) return bySlug;
-    const key = norm(org.name);
-    return lastYearStats.find(d => norm(d.orgName) === key) || null;
-  }
-  function lyBarsHTML(buckets = []) {
-    if (!buckets.length) return '';
-    const bars = buckets.map(b => {
-      const pct = Number(b.percent) || 0;
-      const h = Math.max(2, Math.min(100, pct));
-      return `
-        <div class="ly-bar" style="display:flex;flex-direction:column;align-items:center;gap:4px;width:56px;">
-          <div class="col" style="width:18px;height:${h}%;background:#2ecc71;border-radius:4px;"></div>
-          <div class="pct" style="font:600 11px/1.1 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto;">${pct}%</div>
-          <div class="lab" style="font:500 10px/1.1 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto;color:#7f8c8d;text-align:center;">${b.label}</div>
-        </div>`;
-    }).join('');
-    return `
-      <div class="ly-chart" style="margin-top:12px;">
-        <div class="ly-bars" style="display:flex;gap:12px;align-items:flex-end;min-height:100px;">${bars}</div>
-      </div>`;
-  }
-  function lyFooterHTML(ly) {
-    if (!ly) return '';
-    const donors = ly.totals?.donors || 0;
-    const dollars = ly.totals?.dollars || 0;
-    return `
-      <div class="ly-footer" style="margin-top:16px;padding-top:16px;border-top:1px solid #e8e8e8;">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
-          <div style="font:600 12px/1.2 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto;color:#7f8c8d;">
-            Last year: <span style="color:#2c3e50">${$fmt(dollars)}</span> • <span style="color:#2c3e50">${nfmt(donors)}</span> donors
-          </div>
-          <div style="font:600 12px/1.2 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto;color:#7f8c8d;">Time of day</div>
-        </div>
-        ${lyBarsHTML(ly.dayOf || [])}
-      </div>`;
   }
 
   // --- Summary ---
@@ -171,6 +210,7 @@ function lyFooterHTML(ly) {
     const avgGift = totalDonors ? totalRaised / totalDonors : 0;
     const orgCount = arr.length;
     const next = { totalRaised, totalDonors, avgGift, orgCount };
+    
     if (JSON.stringify(next) !== JSON.stringify(lastSummary)) {
       els.totalRaised.textContent = $fmt(totalRaised);
       els.totalDonors.textContent = nfmt(totalDonors);
@@ -243,11 +283,7 @@ function lyFooterHTML(ly) {
             </div>
           </div>
         </div>
-
-        ${ly ? lyFooterHTML(ly) : ''}
-        const actions = card.querySelector('.org-actions');
-  if (actions) actions.insertAdjacentHTML('beforebegin', lyFooterHTML(ly));
-}
+        ${lyFooterHTML(ly)}
         <div class="org-actions">
           <div class="last-updated">${org.lastUpdated ? 'Updated: ' + new Date(org.lastUpdated).toLocaleTimeString() : 'Not yet updated'}</div>
           <div style="display:flex;gap:8px;">
@@ -332,6 +368,7 @@ function lyFooterHTML(ly) {
     refreshAll();
     toast(`Auto-refresh started (${secs}s)`);
   }
+
   function stop() {
     isMonitoring = false;
     if (timer) clearInterval(timer);
@@ -357,9 +394,13 @@ function lyFooterHTML(ly) {
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
       a.download = `ntgd-${new Date().toISOString().replace(/[:T]/g,'-').slice(0,16)}.csv`;
-      document.body.appendChild(a); a.click(); a.remove();
+      document.body.appendChild(a); 
+      a.click(); 
+      a.remove();
       toast('Data exported');
-    } catch (e) { toast(`Export failed: ${e.message}`, false); }
+    } catch (e) { 
+      toast(`Export failed: ${e.message}`, false); 
+    }
   }
 
   // --- Events ---
@@ -381,16 +422,21 @@ function lyFooterHTML(ly) {
     els.stopBtn?.addEventListener('click', stop);
     els.refreshNowBtn?.addEventListener('click', refreshAll);
     els.exportBtn?.addEventListener('click', exportCSV);
+    
     document.addEventListener('keydown', (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'r') {
-        e.preventDefault(); refreshAll(); toast('Refreshed via keyboard');
+        e.preventDefault(); 
+        refreshAll(); 
+        toast('Refreshed via keyboard');
       }
     });
 
     await loadLastYear();
     await loadAll();
 
-    // background top-up every 10 mins when idle
-    setInterval(() => { if (!isMonitoring) refreshAll(); }, 600000);
+    // Background top-up every 10 mins when idle
+    setInterval(() => { 
+      if (!isMonitoring) refreshAll(); 
+    }, 600000);
   });
 })();
